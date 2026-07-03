@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dagger"
+version = "0.0.0"
+description = "Diarization-guided, accumulation-free target speaker extraction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The dagger authors" }]
+keywords = [
+    "speech separation",
+    "target speaker extraction",
+    "speaker diarization",
+]
+
+# Phase 0 plumbing needs only numpy + pyyaml. The learning stack
+# (torch, torchmetrics, pyannote.audio, wespeaker, whisper) is added
+# phase-by-phase — see CLAUDE.md §3 and §5.
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/RohanBanerjee88/dagger"
+
+[tool.setuptools.packages.find]
+include = ["dagger*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
