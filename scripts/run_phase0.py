@@ -2,16 +2,18 @@
 """Phase 0 entrypoint: mixture -> oracle regions -> copied-solo output -> metrics.
 
 Runs the whole plumbing path with *oracle* diarization and the null extractor
-(no learning yet). It builds a synthetic scene from ``configs/phase0.yaml``,
-derives the ground-truth activity/solo/overlap regions, reconstructs each
-speaker by copying solo regions (overlap left empty until Phase 1), and reports
-SI-SDR overall and split by solo vs. overlap.
+(no learning yet) over a handful of real mixtures. A dataset loader
+(``configs/phase0_*.yaml`` -> LibriMix / WSJ0-2mix) mixes source utterances on
+the fly (storage-lean — only the sources live on the mounted volume), derives
+ground-truth activity/solo/overlap regions, reconstructs each speaker by copying
+solo regions (overlap left empty until Phase 1), and reports SI-SDR overall and
+split by solo vs. overlap.
 
 Phase 0 definition of done (CLAUDE.md §5): solo regions score essentially
-perfectly. Overlap regions score poorly here *by design* — there is no
-extractor yet. Reproduce with::
+perfectly. Overlap regions score poorly here *by design* — there is no extractor
+yet. Reproduce with::
 
-    python scripts/run_phase0.py --config configs/phase0.yaml
+    DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase0.py --config configs/phase0_librimix.yaml
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dagger.audio.provenance import original_mixture
+from dagger.data import Scene, build_dataset
+from dagger.data.paths import load_env
 from dagger.diarize.oracle import (
-    Segment,
     activity_matrix,
     overlap_mixture,
     solo_overlap_regions,
@@ -38,46 +41,23 @@ from dagger.metrics.sisdr import si_sdr_regionwise
 from dagger.reconstruct.stitch import crossfade_windows, reconstruct_all
 
 
-def build_scene(cfg: dict) -> tuple[np.ndarray, np.ndarray, list[Segment], list[str], int]:
-    """Synthesize per-speaker clean sources, the mixture, and oracle segments."""
-    sr = int(cfg["sample_rate"])
-    scene = cfg["scene"]
-    n = int(round(float(scene["duration"]) * sr))
-    t = np.arange(n) / sr
-
-    segments: list[Segment] = []
-    speakers: list[str] = []
-    sources = []
-    for spk in scene["speakers"]:
-        speakers.append(spk["name"])
-        active = np.zeros(n, dtype=np.float64)
-        for start, dur in spk["segments"]:
-            segments.append(Segment(spk["name"], float(start), float(dur)))
-            lo = int(round(float(start) * sr))
-            hi = int(round((float(start) + float(dur)) * sr))
-            active[max(0, lo):min(n, hi)] = 1.0
-        # a clean tone, gated to the speaker's active spans
-        sources.append(np.sin(2 * np.pi * float(spk["freq"]) * t) * active)
-
-    sources = np.stack(sources, axis=0)  # [S, T], row i aligned to speakers[i]
-    mixture = sources.sum(axis=0)
-    return mixture, sources, segments, speakers, sr
+def _fmt(v: float) -> str:
+    if np.isnan(v):
+        return "n/a"
+    return "inf" if v == float("inf") else f"{v:.2f}"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase0.yaml")
-    args = parser.parse_args()
+def score_scene(scene: Scene, fade: int) -> list[tuple[str, float, float, float]]:
+    """Run the Phase 0 path on one scene; return per-speaker region SI-SDRs."""
+    n = scene.mixture.shape[0]
+    activity, speakers = activity_matrix(
+        scene.segments, num_samples=n, sample_rate=scene.sample_rate, speakers=scene.speakers
+    )
+    # Phase 0 red flag (§5): masks must line up with the waveform exactly.
+    assert activity.shape[1] == n, "activity mask length != waveform length"
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
-    mixture, sources, segments, speakers, sr = build_scene(cfg)
-    n = mixture.shape[0]
-    fade = int(round(cfg.get("fade_ms", 0) / 1000.0 * sr))
-
-    activity, speakers = activity_matrix(segments, num_samples=n, sample_rate=sr, speakers=speakers)
     solo, overlap = solo_overlap_regions(activity)
-
-    x = original_mixture(mixture, label="x")
+    x = original_mixture(scene.mixture, label="x")
     x_O = overlap_mixture(x, overlap, label="x_O")  # untouched overlap mixture
 
     outputs = reconstruct_all(
@@ -85,36 +65,57 @@ def main() -> int:
         embeddings=None, extractor=NullExtractor(), fade=fade,
     )
 
-    print(f"scene: {len(speakers)} speakers, {n} samples @ {sr} Hz, fade={fade} samples")
-    print(f"overlap frames: {int(overlap.sum())} / {n}")
-    print()
-    header = (
-        f"{'speaker':>8} | {'solo-interior':>13} | {'solo+seams':>10} | {'overlap':>8}"
-    )
-    print(header)
-    print("-" * len(header))
+    results = []
     for i, spk in enumerate(speakers):
         w_Ei, _ = crossfade_windows(solo[i], activity[i], fade=fade)
-        interior = np.isclose(w_Ei, 1.0)              # copy is bit-exact here
-        solo_i = solo[i].astype(bool)                  # includes crossfade seams
+        interior = np.isclose(w_Ei, 1.0)                       # copy is bit-exact here
+        solo_i = solo[i].astype(bool)                          # includes crossfade seams
         overlap_i = activity[i].astype(bool) & overlap.astype(bool)
+        results.append((
+            spk,
+            si_sdr_regionwise(outputs[i], scene.sources[i], interior),
+            si_sdr_regionwise(outputs[i], scene.sources[i], solo_i),
+            si_sdr_regionwise(outputs[i], scene.sources[i], overlap_i),
+        ))
+    return results
 
-        interior_score = si_sdr_regionwise(outputs[i], sources[i], interior)
-        solo_score = si_sdr_regionwise(outputs[i], sources[i], solo_i)
-        ov_score = si_sdr_regionwise(outputs[i], sources[i], overlap_i)
 
-        def fmt(v: float) -> str:
-            if np.isnan(v):
-                return "n/a"
-            return "inf" if v == float("inf") else f"{v:.2f}"
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="configs/phase0_librimix.yaml")
+    args = parser.parse_args()
 
-        print(f"{spk:>8} | {fmt(interior_score):>13} | {fmt(solo_score):>10} | {fmt(ov_score):>8}")
+    load_env()  # populate DAGGER_DATA_ROOT / credentials from .env if present
+    cfg = yaml.safe_load(Path(args.config).read_text())
+    sample_rate = int(cfg["sample_rate"])
+    fade = int(round(cfg.get("fade_ms", 0) / 1000.0 * sample_rate))
+
+    dataset = build_dataset(cfg)
+    print(f"dataset: {cfg['dataset']['name']}  scenes: {len(dataset)}  @ {sample_rate} Hz  fade={fade} samples")
+    print()
+    header = f"{'scene':>12} | {'speaker':>8} | {'solo-interior':>13} | {'solo+seams':>10} | {'overlap':>8}"
+    print(header)
+    print("-" * len(header))
+
+    solo_scores: list[float] = []
+    overlap_scores: list[float] = []
+    for scene in dataset:
+        for spk, interior_s, solo_s, ov_s in score_scene(scene, fade):
+            print(f"{scene.name[:12]:>12} | {spk:>8} | {_fmt(interior_s):>13} | {_fmt(solo_s):>10} | {_fmt(ov_s):>8}")
+            if not np.isnan(solo_s) and solo_s != float("inf"):
+                solo_scores.append(solo_s)
+            if not np.isnan(ov_s):
+                overlap_scores.append(ov_s)
 
     print()
-    print("Phase 0 check (SI-SDR, dB): 'solo-interior' should read 'inf' — solo audio")
-    print("is copied bit-exact from the mixture. 'solo+seams' is slightly lower where")
-    print("the crossfade tapers (no extractor yet to fill w_Oi). 'overlap' is poor by")
-    print("design until Phase 1 adds the extractor G.")
+    if solo_scores:
+        print(f"mean solo+seams SI-SDR (finite): {np.mean(solo_scores):.2f} dB")
+    if overlap_scores:
+        print(f"mean overlap    SI-SDR         : {np.mean(overlap_scores):.2f} dB (poor by design; no extractor yet)")
+    print()
+    print("Phase 0 check (CLAUDE.md §5): 'solo-interior' reads 'inf' — solo audio is")
+    print("copied bit-exact from the mixture. 'overlap' is poor by design until Phase 1")
+    print("adds the extractor G.")
     return 0
 
 

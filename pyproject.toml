@@ -16,15 +16,23 @@ keywords = [
     "speaker diarization",
 ]
 
-# Phase 0 plumbing needs only numpy + pyyaml. The learning stack
-# (torch, torchmetrics, pyannote.audio, wespeaker, whisper) is added
-# phase-by-phase — see CLAUDE.md §3 and §5.
+# Phase 0 core stays numpy-only. The learning stack (torch, torchmetrics,
+# pyannote.audio, wespeaker, whisper) is added phase-by-phase — see CLAUDE.md
+# §3 and §5. Corpus I/O (soundfile + scipy) is the optional `data` extra so the
+# core install stays light.
 dependencies = [
     "numpy>=1.24",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
+# Real-corpus loaders (LibriMix / WSJ0-2mix): read + resample source audio, and
+# load DAGGER_* env vars from a local .env. Still numpy-only at runtime.
+data = [
+    "soundfile>=0.12",
+    "scipy>=1.10",
+    "python-dotenv>=1.0",
+]
 dev = ["pytest>=7.0"]
 
 [project.urls]
