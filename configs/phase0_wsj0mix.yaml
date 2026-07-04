@@ -1,0 +1,16 @@
+# Phase 0 — plumbing, oracle diarization, no learning yet (CLAUDE.md §5).
+#
+# WSJ0-2mix, mixed on the fly from WSJ0 sources at the SNRs listed in the
+# standard mix_2_spk list (storage-lean: only the sources live on the volume).
+# WSJ0 is LDC-licensed: mount it on DAGGER_DATA_ROOT, or set
+# DAGGER_WSJ0_ACCESS_KEY in .env to authorize a fetch from a private mirror.
+
+sample_rate: 8000        # dev rate for WSJ0/LibriMix (CLAUDE.md §7)
+fade_ms: 5               # crossfade half-width at solo<->overlap seams
+
+dataset:
+  name: wsj0mix
+  metadata: metadata/wsj0-2mix/mix_2_spk_cv.txt          # under DAGGER_DATA_ROOT
+  n_src: 2
+  overlap: 0.5           # staggered-overlap fraction -> solo + overlap regions
+  limit: 8              # a handful of scenes (Phase 0 definition of done)

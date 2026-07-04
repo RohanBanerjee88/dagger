@@ -1,0 +1,15 @@
+# Phase 0 — plumbing, oracle diarization, no learning yet (CLAUDE.md §5).
+#
+# LibriMix, mixed on the fly from LibriSpeech sources (storage-lean: only the
+# sources live on the mounted volume, never the mixtures). Set DAGGER_DATA_ROOT
+# in .env to the mount point; `metadata` is resolved under it.
+
+sample_rate: 8000        # dev rate for WSJ0/LibriMix (CLAUDE.md §7)
+fade_ms: 5               # crossfade half-width at solo<->overlap seams
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri2Mix/libri2mix_dev-clean.csv   # under DAGGER_DATA_ROOT
+  n_src: 2               # 2 or 3 speakers
+  overlap: 0.5           # staggered-overlap fraction -> solo + overlap regions
+  limit: 8              # a handful of scenes (Phase 0 definition of done)

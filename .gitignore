@@ -21,3 +21,11 @@ env/
 .vscode/
 .idea/
 .DS_Store
+
+# Secrets / local env (data root, corpus credentials)
+.env
+
+# Local corpus data — never commit audio; it lives on the mounted volume.
+# Root-anchored so it only ignores a top-level data/ dir, NOT the dagger/data
+# Python package.
+/data/

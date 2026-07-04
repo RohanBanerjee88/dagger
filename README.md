@@ -31,21 +31,46 @@ Implemented and tested:
 - `dagger/reconstruct/` — soft-mask stitching with partition of unity
   (`w_Ei + w_Oi = a_i`) and crossfaded seams.
 - `dagger/metrics/` — SI-SDR (overall and region-wise).
+- `dagger/data/` — real-corpus loaders (**LibriMix**, **WSJ0-2mix**). Mixtures are
+  built *on the fly* from source utterances (storage-lean: only the sources live
+  on the mounted volume, never the mixtures) and *staggered* into a solo →
+  overlap → solo layout so the copy-solo / extract-overlap split is exercised.
+  Oracle activity is derived from the clean sources.
 
-Still open in Phase 0: real dataset loaders (WSJ0-2mix, LibriMix) — the runnable
-demo below uses a self-contained synthetic scene instead.
+Still open in Phase 0 (deferred to later phases per CLAUDE.md §5): the speaker
+-margin and Whisper-WER metrics.
 
 ## Quickstart
 
 ```bash
-pip install -e .            # numpy + pyyaml
-python scripts/run_phase0.py --config configs/phase0.yaml
+pip install -e .            # numpy + pyyaml (core)
 pytest                      # incl. the no-residual-in-audio-path guard
 ```
 
-The Phase 0 run reports SI-SDR split by region: solo interiors are recovered
-bit-exactly (`inf`), while overlap regions are poor by design until Phase 1 adds
-the extractor `G`.
+To run the end-to-end Phase 0 demo on a real corpus you need audio on a mounted
+volume (see below):
+
+```bash
+pip install -e '.[data]'    # soundfile + scipy + python-dotenv
+cp .env.example .env        # set DAGGER_DATA_ROOT (and, for WSJ0, its access key)
+python scripts/run_phase0.py --config configs/phase0_librimix.yaml
+python scripts/run_phase0.py --config configs/phase0_wsj0mix.yaml
+```
+
+The run reports SI-SDR split by region: solo interiors are recovered bit-exactly
+(`inf`), while overlap regions are poor by design until Phase 1 adds the
+extractor `G`.
+
+### Remote-compute data setup
+
+- Mount the corpus (LibriSpeech for LibriMix; WSJ0 for WSJ0-2mix) on the compute
+  node and point `DAGGER_DATA_ROOT` at it in `.env`. Nothing is committed to the
+  repo — `.env` and `data/` are gitignored.
+- Each dataset config's `metadata` path (a LibriMix CSV or a `mix_2_spk` list) is
+  resolved under `DAGGER_DATA_ROOT`.
+- **WSJ0-2mix** is LDC-licensed and has no API key. When the corpus is mounted,
+  no credential is needed. To fetch it from a private mirror instead, set
+  `DAGGER_WSJ0_ACCESS_KEY` in `.env` (the single authorization hook).
 
 ## Where things are going
 
