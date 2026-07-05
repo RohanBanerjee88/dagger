@@ -15,8 +15,10 @@ _EPS = 1e-8
 def si_sdr(estimate: np.ndarray, target: np.ndarray) -> float:
     """SI-SDR in dB between ``estimate`` and ``target`` (1-D waveforms).
 
-    Returns ``+inf`` for a perfect estimate and ``nan`` if the target is silent
-    (SI-SDR is undefined against a zero reference).
+    Returns ``+inf`` for a perfect estimate, ``-inf`` for a silent estimate
+    against real target energy (e.g. an extractor that output nothing), and
+    ``nan`` if the target is silent (SI-SDR is undefined against a zero
+    reference).
     """
     estimate = np.asarray(estimate, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
@@ -24,6 +26,14 @@ def si_sdr(estimate: np.ndarray, target: np.ndarray) -> float:
     target_energy = float(np.dot(target, target))
     if target_energy < _EPS:
         return float("nan")
+
+    # A silent estimate makes scale/projection/noise all exactly zero below --
+    # 10*log10(0/0) is indeterminate, not "perfect". Total silence against a
+    # real target is a total failure, so score it -inf before that ambiguity
+    # can masquerade as +inf.
+    estimate_energy = float(np.dot(estimate, estimate))
+    if estimate_energy < _EPS:
+        return float("-inf")
 
     scale = float(np.dot(estimate, target)) / (target_energy + _EPS)
     projection = scale * target

@@ -104,7 +104,7 @@ def main() -> int:
             print(f"{scene.name[:12]:>12} | {spk:>8} | {_fmt(interior_s):>13} | {_fmt(solo_s):>10} | {_fmt(ov_s):>8}")
             if not np.isnan(solo_s) and solo_s != float("inf"):
                 solo_scores.append(solo_s)
-            if not np.isnan(ov_s):
+            if not np.isnan(ov_s) and np.isfinite(ov_s):
                 overlap_scores.append(ov_s)
 
     print()
