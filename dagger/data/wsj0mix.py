@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dagger.data.activity import segments_from_sources
+from dagger.data.activity import segments_from_placement
 from dagger.data.audio_io import read_wav
 from dagger.data.base import Scene, SceneDataset
 from dagger.data.mixing import db_to_linear, mix_sources, stagger_offsets
@@ -110,11 +110,12 @@ class Wsj0MixDataset(SceneDataset):
             sources_raw.append(read_wav(resolved, self.sample_rate))
             gains.append(db_to_linear(snr_db))
 
-        offsets = stagger_offsets([len(s) for s in sources_raw], self.overlap)
+        lengths = [len(s) for s in sources_raw]
+        offsets = stagger_offsets(lengths, self.overlap)
         sources, mixture = mix_sources(
             sources_raw, gains=gains, offsets=offsets, length_mode="max"
         )
-        segments = segments_from_sources(sources, speakers, self.sample_rate)
+        segments = segments_from_placement(offsets, lengths, speakers, self.sample_rate)
         return Scene(
             mixture=mixture,
             sources=sources,

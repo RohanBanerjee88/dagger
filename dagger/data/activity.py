@@ -105,6 +105,15 @@ def segments_from_sources(
     padded, aligned output of :func:`dagger.data.mixing.mix_sources`). Returns a
     flat list of :class:`Segment` across all speakers, ready for
     :func:`dagger.diarize.oracle.activity_matrix`.
+
+    This is a VAD *estimate*, not exact ground truth: a source's quiet trailing
+    consonants or soft onsets can fall below ``threshold_db`` while still being
+    non-zero, leaking a faint residual across a solo/overlap boundary. When the
+    exact placement window is known (:func:`dagger.data.mixing.mix_sources`'s
+    ``offsets``/lengths, as in the LibriMix and WSJ0-2mix loaders) prefer
+    :func:`segments_from_placement`, which has no such leakage. Reach for this
+    function only when a corpus gives you clean per-speaker tracks without known
+    placement (e.g. real solo/overlap reference recordings).
     """
     sources = np.asarray(sources, dtype=np.float64)
     if sources.shape[0] != len(speakers):
@@ -113,4 +122,35 @@ def segments_from_sources(
     for i, speaker in enumerate(speakers):
         mask = active_mask(sources[i], sample_rate, **vad_kwargs)
         segments.extend(_mask_to_segments(mask, speaker, sample_rate))
+    return segments
+
+
+def segments_from_placement(
+    offsets: list[int],
+    lengths: list[int],
+    speakers: list[str],
+    sample_rate: int,
+) -> list[Segment]:
+    """Exact oracle segments from known placement windows -- no VAD, no leakage.
+
+    For mixtures built by :func:`dagger.data.mixing.mix_sources`, speaker ``i``
+    occupies exactly ``[offsets[i], offsets[i] + lengths[i])`` and is exactly
+    zero outside it. Using that literal window (instead of estimating activity
+    from signal energy, as :func:`segments_from_sources` does) means a solo
+    region's copy is bit-exact: no quiet real content from a neighboring
+    speaker's clip can be mistaken for silence and leak across the boundary.
+    """
+    if not (len(offsets) == len(lengths) == len(speakers)):
+        raise ValueError("offsets, lengths, and speakers must have equal length.")
+    segments: list[Segment] = []
+    for speaker, offset, length in zip(speakers, offsets, lengths):
+        if length <= 0:
+            continue
+        segments.append(
+            Segment(
+                speaker=speaker,
+                start=offset / sample_rate,
+                duration=length / sample_rate,
+            )
+        )
     return segments
