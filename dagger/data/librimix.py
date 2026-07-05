@@ -35,10 +35,14 @@ from dagger.data.paths import resolve_data_root
 def _resolve_source_path(raw: str, data_root: Path) -> Path:
     """Re-root a CSV source path onto ``data_root``.
 
-    LibriMix metadata often stores absolute paths from the machine that generated
-    it. We try, in order: the path as-is (if it exists), ``data_root / raw``, and
-    finally re-rooting from the ``LibriSpeech`` component onward — so metadata
-    generated elsewhere still resolves against the local mount.
+    LibriMix metadata comes in two shapes depending on how it was generated:
+    absolute paths from the machine that built it (containing a ``LibriSpeech``
+    component we can re-root from), or paths already relative to the
+    LibriSpeech root itself (e.g. ``dev-clean/1272/...``, the shape the
+    official generator's checked-in CSVs use). We try, in order: the path
+    as-is (if absolute and it exists), ``data_root / raw``, re-rooting from the
+    ``LibriSpeech`` component onward, and finally nesting under
+    ``data_root / "LibriSpeech"`` for the relative-to-root shape.
     """
     p = Path(raw)
     if p.is_absolute() and p.exists():
@@ -49,7 +53,12 @@ def _resolve_source_path(raw: str, data_root: Path) -> Path:
     parts = p.parts
     if "LibriSpeech" in parts:
         idx = parts.index("LibriSpeech")
-        return data_root.joinpath(*parts[idx:])
+        rerooted = data_root.joinpath(*parts[idx:])
+        if rerooted.exists():
+            return rerooted
+    under_librispeech = data_root / "LibriSpeech" / raw
+    if under_librispeech.exists():
+        return under_librispeech
     return joined  # let the reader raise a clear FileNotFoundError
 
 
