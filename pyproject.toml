@@ -33,6 +33,17 @@ data = [
     "scipy>=1.10",
     "python-dotenv>=1.0",
 ]
+# Phase 1 learning stack: the speaker encoder phi (NeMo TitaNet-Large), the
+# extractor G (an original TF-GridNet + cross-attention implementation, torch
+# -only, no external TSE toolkit dependency -- see CLAUDE.md Phase 1 notes on
+# WeSep/USEF-TSE licensing), and the eval-only encoder (WavLM via
+# transformers, deliberately a different model from phi).
+ml = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "transformers>=4.40",
+    "nemo_toolkit[asr]",
+]
 dev = ["pytest>=7.0"]
 
 [project.urls]
@@ -40,6 +51,3 @@ Homepage = "https://github.com/RohanBanerjee88/dagger"
 
 [tool.setuptools.packages.find]
 include = ["dagger*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

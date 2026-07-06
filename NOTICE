@@ -15,3 +15,13 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+Third-party model attribution
+------------------------------
+
+This product uses the "TitaNet-Large" speaker-verification checkpoint
+(nvidia/speakerverification_en_titanet_large), Copyright NVIDIA Corporation,
+licensed under CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/),
+as the frozen speaker encoder phi (dagger/enroll/encoder.py). It is loaded
+at runtime via the NVIDIA NeMo toolkit (Apache License 2.0) and is not
+redistributed as part of this repository.

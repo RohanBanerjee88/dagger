@@ -7,6 +7,8 @@ estimate gives ``+inf``.
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 
 _EPS = 1e-8
@@ -59,3 +61,34 @@ def si_sdr_regionwise(
     if not mask.any():
         return float("nan")
     return si_sdr(np.asarray(estimate)[mask], np.asarray(target)[mask])
+
+
+def si_sdr_best_permutation(
+    estimates: np.ndarray,
+    targets: np.ndarray,
+) -> tuple[list[float], tuple[int, ...]]:
+    """Best-permutation per-speaker SI-SDR for order-unconstrained output.
+
+    Blind separation (:class:`~dagger.extract.blind.BlindSeparator`) has no
+    fixed output order, unlike the proposed extractor (whose output order
+    always matches the embedding it was conditioned on). ``estimates``/
+    ``targets`` are ``[S, T]``. Returns ``(per_speaker_si_sdr, perm)`` for the
+    permutation of ``estimates`` rows that maximizes total SI-SDR (``nan``
+    values, from a silent target, are treated as 0 for the purpose of ranking
+    permutations but reported as-is).
+    """
+    estimates = np.asarray(estimates)
+    targets = np.asarray(targets)
+    num_speakers = targets.shape[0]
+
+    best_perm = tuple(range(num_speakers))
+    best_scores: list[float] | None = None
+    best_total = float("-inf")
+    for perm in itertools.permutations(range(num_speakers)):
+        scores = [si_sdr(estimates[perm[i]], targets[i]) for i in range(num_speakers)]
+        total = sum(0.0 if np.isnan(s) else s for s in scores)
+        if total > best_total:
+            best_total = total
+            best_scores = scores
+            best_perm = perm
+    return best_scores or [], best_perm
