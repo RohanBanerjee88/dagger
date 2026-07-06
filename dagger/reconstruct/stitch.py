@@ -69,6 +69,13 @@ def reconstruct_speaker(
 
     ``s_hat_i = x·w_Ei + G(x_O, e_i)·w_Oi``. The extractor is fed ``x_O`` (an
     original-mixture :class:`TrackedSignal`); it will raise if handed a residual.
+
+    Known Phase 1 limitation (CLAUDE.md §5 Phase 1 red flags: "G receiving
+    x·1_Oi with hard masks (fix later, but note it)"): ``x_O`` is built once by
+    the caller via a hard binary ``overlap`` mask and shared, unchanged, across
+    every speaker here -- ``G`` never sees context beyond the overlap region.
+    This is scheduled to be revisited in Phase 2 (the reconstruction-quality
+    phase), not fixed here.
     """
     w_Ei, w_Oi = crossfade_windows(solo_i, activity_i, fade=fade)
     x_samples = np.asarray(x, dtype=np.float64)

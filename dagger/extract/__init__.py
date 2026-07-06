@@ -1,13 +1,16 @@
 """The extractor ``G(x_O, e_i)`` and its audio-path guard.
 
-Phase 0 ships only :class:`NullExtractor` (no learning yet): it returns silence
-on the overlap region, so reconstruction recovers solo regions exactly and
-leaves overlaps empty. The real extractor (TF-GridNet + cross-attention fusion,
-CLAUDE.md §3) arrives in Phase 1.
+Phase 0 shipped only :class:`NullExtractor` (no learning yet). Phase 1 adds the
+real extractor, :class:`~dagger.extract.tfgridnet_crossattn.TFGridNetCrossAttnExtractor`
+(an original TF-GridNet + cross-attention implementation, CLAUDE.md §3), and a
+blind-separation baseline, :class:`~dagger.extract.blind.BlindSeparator`, for
+comparison. Torch is imported lazily inside these modules' functions, so
+``import dagger.extract`` never requires the ``[ml]`` extra.
 
-Every extractor runs its input through :func:`dagger.audio.provenance.
+Every :class:`Extractor` runs its input through :func:`dagger.audio.provenance.
 require_original_mixture`, so feeding a residual into ``G`` raises rather than
-silently corrupting the result (guardrail §6.7).
+silently corrupting the result (guardrail §6.7). :class:`~dagger.extract.blind.
+BlindSeparator` honors the same guard even though it is diagnostic-only.
 """
 
 from dagger.extract.base import Extractor, NullExtractor

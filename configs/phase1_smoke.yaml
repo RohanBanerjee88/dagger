@@ -1,0 +1,39 @@
+# Phase 1 -- tiny CPU smoke config. Plumbing/shape validation only: proves
+# scripts/train_phase1.py and scripts/run_phase1.py run end to end without
+# crashing or violating the no-residual guard. NOT a quality benchmark --
+# see CLAUDE.md §5 Phase 1 "definition of done" for the real literature-bar
+# and proposed-vs-blind checks, which need a full training run instead.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri2Mix/libri2mix_dev-clean.csv   # under DAGGER_DATA_ROOT
+  n_src: 2
+  overlap: 0.5
+  limit: 4
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 16
+  n_blocks: 2
+  n_fft: 256
+  hop_length: 64
+  n_heads: 2
+  n_tokens: 4
+  cross_attn_blocks: 1
+
+train:
+  system: proposed        # proposed | blind
+  epochs: 1
+  batch_size: 2
+  segment_seconds: 1.0
+  lr: 0.001
+  checkpoint_out: checkpoints/phase1/smoke.pt
+
+eval:
+  results_dir: results

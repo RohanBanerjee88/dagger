@@ -1,0 +1,28 @@
+# Phase 1 -- 2-speaker literature-bar check (CLAUDE.md §5 Phase 1). Eval split.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: wsj0mix
+  metadata: metadata/wsj0-2mix/mix_2_spk_tt.txt   # under DAGGER_DATA_ROOT
+  n_src: 2
+  overlap: 0.5
+  limit: 50
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 4
+  cross_attn_blocks: 1
+  checkpoint: checkpoints/phase1/proposed_wsj0mix_2spk.pt
+
+eval:
+  results_dir: results
