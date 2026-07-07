@@ -48,6 +48,12 @@ def build_block(hidden_channels: int, n_heads: int = 4):
     inside this function) so importing this file never requires ``torch`` to
     be installed.
     """
+    if hidden_channels % 2 != 0:
+        raise ValueError(
+            f"hidden_channels must be even (split in half for the bidirectional "
+            f"intra/inter LSTMs), got {hidden_channels}."
+        )
+
     torch = _lazy_torch()
     import torch.nn as nn
 

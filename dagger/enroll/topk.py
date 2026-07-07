@@ -16,6 +16,20 @@ import numpy as np
 from dagger.enroll.encoder import SpeakerEncoder
 
 
+class NoSoloRegionError(ValueError):
+    """A speaker has no usable solo audio to enroll from.
+
+    This is the one benign, expected-to-happen-sometimes enrollment failure
+    (a speaker who's never alone long enough, plausible on multi-speaker
+    corpora with high overlap fractions) -- callers may legitimately catch
+    *this specific type* to skip a scene/speaker and continue. It is
+    deliberately a different type from the plain :class:`ValueError` raised
+    below for the overlap-contamination guard, which must never be silently
+    caught: that one indicates a real diarization/oracle-region bug and
+    should fail loudly (see this module's docstring).
+    """
+
+
 @dataclass(frozen=True)
 class EnrollmentResult:
     """One speaker's enrollment: mean embedding, per-dimension variance, clip count.
@@ -66,13 +80,16 @@ def select_topk_solo_clips(
     """
     solo_i = np.asarray(solo_i)
     if not solo_i.any():
-        raise ValueError(
+        raise NoSoloRegionError(
             "select_topk_solo_clips: solo_i has no active samples -- this "
             "speaker has no solo region to enroll from."
         )
     if activity_i is not None:
         activity_i = np.asarray(activity_i)
         if not np.all(solo_i.astype(bool) <= activity_i.astype(bool)):
+            # Deliberately a plain ValueError, NOT NoSoloRegionError: this signals
+            # a real diarization/oracle-region bug, not benign missing solo audio,
+            # and must not be caught by skip-and-continue callers.
             raise ValueError(
                 "select_topk_solo_clips: solo_i is not a subset of activity_i -- "
                 "this looks like an overlap frame was mistaken for solo audio."
@@ -93,7 +110,7 @@ def mean_embedding(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Embed each clip and return ``(mean, variance)`` across clips, shape ``[D]`` each."""
     if not clips:
-        raise ValueError("mean_embedding: no clips to embed.")
+        raise NoSoloRegionError("mean_embedding: no clips to embed.")
     embeddings = np.stack([encoder.embed(clip, sample_rate) for clip in clips], axis=0)
     return embeddings.mean(axis=0), embeddings.var(axis=0)
 

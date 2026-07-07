@@ -38,7 +38,7 @@ from dagger.data import Scene, build_dataset
 from dagger.data.paths import load_env
 from dagger.diarize.oracle import activity_matrix, overlap_mixture, solo_overlap_regions
 from dagger.enroll.encoder import TitaNetEncoder
-from dagger.enroll.topk import enroll_speaker
+from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.extract.blind import BlindSeparator
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
 from dagger.metrics.sisdr import si_sdr_best_permutation, si_sdr_regionwise
@@ -103,10 +103,15 @@ def score_scene(
 
     margins = None
     if eval_encoder is not None:
-        margins = eval_enroll_and_margin(
-            scene.mixture, solo, activity, proposed_outputs, scene.sample_rate,
-            eval_encoder, k=enroll_k,
-        )
+        try:
+            margins = eval_enroll_and_margin(
+                scene.mixture, solo, activity, proposed_outputs, scene.sample_rate,
+                eval_encoder, k=enroll_k, min_clip_ms=min_clip_ms,
+            )
+        except NoSoloRegionError as exc:
+            # Diagnostic-only: a failure here must not discard this scene's
+            # already-computed, real SI-SDR rows -- just drop the margin column.
+            print(f"[eval-margin] skipping margin for scene {scene.name!r}: {exc}")
 
     rows = []
     for i, spk in enumerate(speakers):
@@ -202,11 +207,23 @@ def main() -> int:
     print("-" * len(header))
 
     rows: list[dict] = []
+    skipped: list[tuple[str, str]] = []  # (scene name, reason)
     for scene in dataset:
-        for row in score_scene(
-            scene, fade, enroll_k, min_clip_ms, encoder, proposed_extractor,
-            blind_separator, eval_encoder,
-        ):
+        try:
+            scene_rows = score_scene(
+                scene, fade, enroll_k, min_clip_ms, encoder, proposed_extractor,
+                blind_separator, eval_encoder,
+            )
+        except NoSoloRegionError as exc:
+            # Only the benign "no usable solo audio" enrollment case is skip-worthy.
+            # A plain ValueError (e.g. BlindSeparator's num_speakers mismatch, or the
+            # overlap-contamination guard in dagger.enroll.topk) is a real bug and
+            # must propagate rather than be silently folded into this skip summary.
+            reason = str(exc)
+            skipped.append((scene.name, reason))
+            print(f"[enroll] skipping scene {scene.name!r}: {reason}")
+            continue
+        for row in scene_rows:
             print(
                 f"{row['scene'][:12]:>12} | {row['speaker']:>8} | "
                 f"{_fmt(row['solo_interior']):>13} | {_fmt(row['solo_seams']):>10} | "
@@ -214,6 +231,12 @@ def main() -> int:
                 f"{_fmt(row['eval_margin']):>7}"
             )
             rows.append(row)
+
+    if skipped:
+        print(
+            f"[enroll] skipped {len(skipped)}/{len(dataset)} scenes during enrollment "
+            f"(see per-scene messages above): {[name for name, _ in skipped]}"
+        )
 
     n_src = cfg["dataset"].get("n_src", 2)
     stem = f"phase1_{cfg['dataset']['name']}_{n_src}spk"

@@ -77,9 +77,9 @@ embedding / mean embedding · `G` extractor · `ε_i` extraction error · `M_i` 
 | Module | Tool / model | Notes |
 |---|---|---|
 | Diarization | **pyannote.audio 4.0.x + `community-1`** | Gated on HF (free). Ungated fallback: NeMo Sortformer. |
-| Speaker encoder `φ` | **WeSpeaker** toolkit, **ReDimNet2** encoder | Freeze pretrained weights first; fine-tune late. |
-| **Eval-only** encoder | Different model (WavLM-based / **Kiwano**) | MUST differ from `φ`, or we cheat on speaker metrics. |
-| Extractor `G` | **TF-GridNet + cross-attention fusion** (USEF-TSE recipe), via **WeSep** | Conv-TasNet+FiLM = fast baseline. |
+| Speaker encoder `φ` | **NVIDIA NeMo TitaNet-Large** (`nvidia/speakerverification_en_titanet_large`) | Freeze pretrained weights first; fine-tune late. Revised from the original WeSpeaker+ReDimNet2 pick during Phase 1 planning: consolidates with NeMo Sortformer (the diarizer fallback below) on one framework. Checkpoint is CC-BY-4.0 (attributed in `NOTICE`); toolkit is Apache-2.0. |
+| **Eval-only** encoder | `microsoft/wavlm-base-plus-sv` via `transformers` | MUST differ from `φ` — chosen over Kiwano for a simple pip-installable path; architecturally unrelated to TitaNet. |
+| Extractor `G` | **TF-GridNet + cross-attention fusion**, original implementation from the published architecture (informed by the USEF-TSE paper, arXiv:2409.02615) | Not vendored from USEF-TSE (CC-BY-NC 4.0, incompatible with this repo's Apache-2.0) or WeSep (no license file). Conv-TasNet+FiLM fast baseline was skipped in favor of building this directly. |
 | Signal metrics | **torchmetrics** (SI-SDR, SDR) | |
 | Intelligibility | **Whisper large-v3** for WER | |
 | Refinement precedent | TS-SEP / EvoTSE (for related-work + comparison) | Our novelty = the honest gate + accumulation-free proof. |
