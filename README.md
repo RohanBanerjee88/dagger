@@ -44,8 +44,12 @@ Still open in Phase 0 (deferred to later phases per CLAUDE.md §5): the speaker
 
 ```bash
 pip install -e .            # numpy + pyyaml (core)
-pytest                      # incl. the no-residual-in-audio-path guard
 ```
+
+No automated test suite is currently maintained (`tests/` was removed; the
+no-residual-in-audio-path guard is verified manually instead — see
+`dagger/audio/provenance.py` and the guard call sites in
+`dagger/extract/base.py`/`dagger/extract/blind.py`).
 
 To run the end-to-end Phase 0 demo on a real corpus you need audio on a mounted
 volume (see below):

@@ -72,6 +72,7 @@ def eval_enroll_and_margin(
     sample_rate: int,
     encoder: EvalSpeakerEncoder,
     k: int = 3,
+    min_clip_ms: float = 500.0,
 ) -> list[float]:
     """Per-speaker identity margin ``M_i`` of the reconstructed outputs.
 
@@ -82,11 +83,19 @@ def eval_enroll_and_margin(
     module), then computes the margin -- never raw similarity --
     ``M_i = cos(s_hat_i, e_i) - max_{j!=i} cos(s_hat_i, e_j)``, all in
     WavLM-embedding space, never mixing it with phi's TitaNet-space vectors.
+
+    ``min_clip_ms`` MUST match whatever threshold the caller used for the
+    primary (phi-space) enrollment -- e.g. ``scripts/run_phase1.py``'s
+    ``enroll.min_clip_ms`` config value. Passing a stricter threshold here
+    than was used for the real enrollment risks this diagnostic-only
+    computation failing on a scene whose actual extraction succeeded.
     """
     num_speakers = outputs.shape[0]
     eval_embeddings = []
     for i in range(num_speakers):
-        clips = select_topk_solo_clips(mixture, solo[i], sample_rate, k=k, activity_i=activity[i])
+        clips = select_topk_solo_clips(
+            mixture, solo[i], sample_rate, k=k, min_clip_ms=min_clip_ms, activity_i=activity[i]
+        )
         e_i, _ = mean_embedding(clips, sample_rate, encoder)
         eval_embeddings.append(e_i)
 

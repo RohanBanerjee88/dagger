@@ -48,6 +48,26 @@ def _device(preferred: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _checkpoint_path(cfg: dict, system: str) -> Path:
+    """Checkpoint path for ``system``, derived deterministically from config.
+
+    Strips any existing ``proposed_``/``blind_`` prefix off the configured
+    ``checkpoint_out`` stem and prepends ``system`` -- so ``proposed`` and
+    ``blind`` runs of the *same* config always land at different paths,
+    regardless of what the config's filename happens to contain (previously
+    this was a fragile ``"proposed"`` -> ``"blind"`` string substitution that
+    silently collided for filenames like ``smoke.pt`` with no "proposed"
+    substring to replace).
+    """
+    base = Path(cfg["train"]["checkpoint_out"])
+    stem = base.stem
+    for prefix in ("proposed_", "blind_"):
+        if stem.startswith(prefix):
+            stem = stem[len(prefix):]
+            break
+    return base.parent / f"{system}_{stem}{base.suffix}"
+
+
 def train_proposed(cfg: dict, device: str) -> None:
     import torch
 
@@ -101,7 +121,7 @@ def train_proposed(cfg: dict, device: str) -> None:
         mean_loss = total_loss / max(n_batches, 1)
         print(f"[proposed] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}")
 
-    checkpoint_out = Path(cfg["train"]["checkpoint_out"])
+    checkpoint_out = _checkpoint_path(cfg, "proposed")
     checkpoint_out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"state_dict": model.state_dict(), "model_config": cfg.get("extractor", {}),
@@ -149,7 +169,7 @@ def train_blind(cfg: dict, device: str) -> None:
         mean_loss = total_loss / max(n_batches, 1)
         print(f"[blind] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}")
 
-    checkpoint_out = Path(str(cfg["train"]["checkpoint_out"]).replace("proposed", "blind"))
+    checkpoint_out = _checkpoint_path(cfg, "blind")
     checkpoint_out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"state_dict": model.state_dict(), "model_config": extractor_cfg,

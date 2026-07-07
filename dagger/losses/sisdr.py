@@ -21,7 +21,7 @@ def si_sdr_loss(estimate, target, eps: float = 1e-8, reduction: str = "mean"):
     projection = scale * target
     noise = estimate - projection
 
-    ratio = (projection * projection).sum(dim=-1) / (noise * noise).sum(dim=-1) + eps
+    ratio = (projection * projection).sum(dim=-1) / ((noise * noise).sum(dim=-1) + eps)
     neg_si_sdr = -10.0 * torch.log10(ratio + eps)
 
     if reduction == "none":
