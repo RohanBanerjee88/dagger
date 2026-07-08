@@ -105,18 +105,25 @@ class TitaNetEncoder(SpeakerEncoder):
         if checkpoint_source not in loaders:
             raise ValueError(f"Unknown checkpoint_source {checkpoint_source!r}.")
 
-        last_error: Exception | None = None
-        for loader in loaders[checkpoint_source]:
+        attempted = loaders[checkpoint_source]
+        errors: list[tuple[str, Exception]] = []
+        for loader in attempted:
             try:
                 model = loader()
                 break
             except Exception as exc:  # noqa: BLE001 -- deliberately broad fallback chain
-                last_error = exc
+                errors.append((loader.__name__, exc))
                 continue
         else:
+            # Report every attempt, not just the last -- with "auto" trying three
+            # loaders, the last one's error (often the least informative, e.g. the
+            # random_init fallback re-hitting the same root import failure as the
+            # others) used to be the only one surfaced, hiding the real cause.
+            detail = "\n".join(f"  - {name}: {exc!r}" for name, exc in errors)
             raise RuntimeError(
-                f"Could not load TitaNet-Large via {checkpoint_source!r}."
-            ) from last_error
+                f"Could not load TitaNet-Large via {checkpoint_source!r}. "
+                f"Attempts:\n{detail}"
+            ) from errors[-1][1]
 
         model = model.to(self.device)
         model.eval()
