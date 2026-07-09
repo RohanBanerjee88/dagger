@@ -149,4 +149,6 @@ class TitaNetEncoder(SpeakerEncoder):
             with torch.no_grad():
                 embedding = self._model.get_embedding(f.name)
 
+        if isinstance(embedding, torch.Tensor):
+            embedding = embedding.detach().cpu()
         return np.asarray(embedding, dtype=np.float64).reshape(-1)
