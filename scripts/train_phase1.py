@@ -106,16 +106,21 @@ def train_proposed(cfg: dict, device: str) -> None:
             x_o = mixture * overlap  # shared hard-masked x_O, same as inference
 
             optimizer.zero_grad()
-            loss = 0.0
+            # Backward per speaker so only one extractor graph is alive at a
+            # time -- summing all speakers' losses before backward() holds
+            # num_speakers full TF-GridNet graphs and OOMs on 16 GB GPUs.
+            # Gradients accumulate across backward() calls, so this matches
+            # the summed loss exactly.
+            batch_loss = 0.0
             for i in range(num_speakers):
                 estimate = model(x_o, embeddings[:, i, :])
                 weight = w_overlap[:, i, :]
-                loss = loss + si_sdr_loss(estimate * weight, sources[:, i, :] * weight)
-            loss = loss / num_speakers
-            loss.backward()
+                loss = si_sdr_loss(estimate * weight, sources[:, i, :] * weight) / num_speakers
+                loss.backward()
+                batch_loss += float(loss.item())
             optimizer.step()
 
-            total_loss += float(loss.item())
+            total_loss += batch_loss
             n_batches += 1
 
         mean_loss = total_loss / max(n_batches, 1)
