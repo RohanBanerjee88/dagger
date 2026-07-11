@@ -165,8 +165,12 @@ training/eval sets and biasing survivors toward `L2 > L1` orderings. The mixing 
 promise ("every mixture has a solo lead-in, an overlap middle, and a solo tail") only holds for
 2 speakers. The skip-on-no-solo behavior itself is correct and stays (unenrollable speakers are
 real; Phase 3 must handle them) — the bug is that our own generator manufactures them.
-*Planned fix:* make placement solo-aware — enforce a minimum solo window per speaker when
-computing offsets, instead of only tuning `overlap`.
+*Fixed (2026-07-11):* `stagger_offsets` now takes `min_solo` (samples) and pushes each start
+just late enough that every speaker keeps a contiguous solo window of
+`min(min_solo, own length)`; both loaders pass it via the `min_solo_ms` config key
+(default 1000 ms — above enrollment's 500 ms `min_clip_ms`). `min_solo_ms: 0` restores the
+legacy length-ratio-dependent behavior. Trade-off: the guarantee takes precedence over
+`overlap`, so adjacent short utterances may overlap less than requested.
 *Phase 2 heads-up:* a chain-staggered scene where the middle speaker has solo time **cannot**
 contain a depth-3 overlap (s2's solo requires s1 to end before s3 starts). The depth-stratified
 experiment needs both per-speaker solos *and* deep overlaps, so Phase 2 placement must become a

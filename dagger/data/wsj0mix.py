@@ -75,6 +75,9 @@ class Wsj0MixDataset(SceneDataset):
         self.sample_rate = int(sample_rate)
         self.n_src = int(cfg.get("n_src", 2))
         self.overlap = float(cfg.get("overlap", 0.5))
+        # Guaranteed per-speaker solo window (see stagger_offsets); same default
+        # rationale as LibriMixDataset.
+        self.min_solo = int(round(float(cfg.get("min_solo_ms", 1000.0)) / 1000.0 * self.sample_rate))
         self.limit = cfg.get("limit")
         self.data_root = resolve_data_root()
         ensure_access(self.data_root)
@@ -111,7 +114,7 @@ class Wsj0MixDataset(SceneDataset):
             gains.append(db_to_linear(snr_db))
 
         lengths = [len(s) for s in sources_raw]
-        offsets = stagger_offsets(lengths, self.overlap)
+        offsets = stagger_offsets(lengths, self.overlap, min_solo=self.min_solo)
         sources, mixture = mix_sources(
             sources_raw, gains=gains, offsets=offsets, length_mode="max"
         )

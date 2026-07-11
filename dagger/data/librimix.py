@@ -69,6 +69,10 @@ class LibriMixDataset(SceneDataset):
         self.sample_rate = int(sample_rate)
         self.n_src = int(cfg.get("n_src", 2))
         self.overlap = float(cfg.get("overlap", 0.5))
+        # Guaranteed per-speaker solo window (see stagger_offsets). Default 1 s:
+        # comfortably above enrollment's min_clip_ms=500 default, so 3-mix scenes
+        # stop being skipped for lack of solo audio.
+        self.min_solo = int(round(float(cfg.get("min_solo_ms", 1000.0)) / 1000.0 * self.sample_rate))
         self.limit = cfg.get("limit")
         self.data_root = resolve_data_root()
         self.metadata = self.data_root / str(cfg["metadata"])
@@ -102,7 +106,7 @@ class LibriMixDataset(SceneDataset):
             gains.append(float(row.get(f"source_{k}_gain", 1.0)))
 
         lengths = [len(s) for s in sources_raw]
-        offsets = stagger_offsets(lengths, self.overlap)
+        offsets = stagger_offsets(lengths, self.overlap, min_solo=self.min_solo)
         sources, mixture = mix_sources(
             sources_raw, gains=gains, offsets=offsets, length_mode="max"
         )
