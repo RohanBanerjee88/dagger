@@ -155,6 +155,24 @@ by accident.
 
 **Definition of done:** proposed > blind on 3-speaker mixtures, oracle diarization, table saved.
 
+**⚠ KNOWN ISSUE (found 2026-07-11, first Phase 1 runs): `stagger_offsets` starves speakers of
+solo time on 3+ speakers.** Chain placement starts utterance *i+1* at `(1 − overlap)` into
+utterance *i* (`dagger/data/mixing.py`), so solo time depends on *random length ratios*: with
+`overlap: 0.5`, the middle speaker of a 3-mix gets a solo window only if `L2 > L1`, and the last
+only if `L3 > ~0.5·L2`. Result on Libri3Mix: **~70–80% of scenes are skipped at enrollment**
+(`NoSoloRegionError`, caught and logged — not a crash), silently shrinking the effective
+training/eval sets and biasing survivors toward `L2 > L1` orderings. The mixing docstring's
+promise ("every mixture has a solo lead-in, an overlap middle, and a solo tail") only holds for
+2 speakers. The skip-on-no-solo behavior itself is correct and stays (unenrollable speakers are
+real; Phase 3 must handle them) — the bug is that our own generator manufactures them.
+*Planned fix:* make placement solo-aware — enforce a minimum solo window per speaker when
+computing offsets, instead of only tuning `overlap`.
+*Phase 2 heads-up:* a chain-staggered scene where the middle speaker has solo time **cannot**
+contain a depth-3 overlap (s2's solo requires s1 to end before s3 starts). The depth-stratified
+experiment needs both per-speaker solos *and* deep overlaps, so Phase 2 placement must become a
+small scheduler (e.g., per speaker: one guaranteed solo segment + one deliberately deep
+overlapped segment) — the solo-aware offset fix above is not sufficient for Phase 2.
+
 ### ☐ Phase 2 — THE money experiment (validates: accumulation-free reconstruction)
 
 **Goal:** prove the central claim empirically.
@@ -239,4 +257,5 @@ for the proposed system.
 
 ---
 
-*Last updated: keep this line current whenever the plan changes.*
+*Last updated: 2026-07-11 — documented the `stagger_offsets` solo-starvation issue on 3+ speakers
+(Phase 1 known issue) and the solo-vs-depth placement tension it implies for Phase 2.*
