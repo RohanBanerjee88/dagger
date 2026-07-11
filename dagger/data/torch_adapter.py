@@ -26,6 +26,14 @@ from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.reconstruct.stitch import crossfade_windows
 
 
+def _overlap_runs(overlap: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(starts, cumulative_lengths)`` of contiguous overlap runs in a 0/1 mask."""
+    padded = np.concatenate([[0], np.asarray(overlap).astype(np.int8), [0]])
+    edges = np.flatnonzero(np.diff(padded))
+    starts, ends = edges[0::2], edges[1::2]
+    return starts, np.cumsum(ends - starts)
+
+
 def build_scene_crop_dataset(
     dataset: SceneDataset,
     segment_seconds: float,
@@ -33,6 +41,7 @@ def build_scene_crop_dataset(
     enroll_k: int = 3,
     fade: int = 0,
     seed: int | None = None,
+    require_overlap: bool = False,
 ):
     """Build a ``torch.utils.data.Dataset`` of fixed-length training crops.
 
@@ -44,6 +53,16 @@ def build_scene_crop_dataset(
     i.e. exactly the weighting the proposed extractor is scored against at
     inference time), and (if ``encoder`` was given) ``embeddings`` (``[S, D]``,
     the frozen per-speaker enrollment).
+
+    Crops are *overlap-centered*: each ``__getitem__`` picks a random overlap
+    sample (uniform over overlap samples, via precomputed run boundaries) and
+    centers the crop on it, falling back to a uniform-random start when the
+    scene has no overlap. Uniform starts mostly land on solo stretches, where
+    the extractor's windowed loss has no target — see the Phase 1 training
+    notes in ``scripts/train_phase1.py``.
+
+    ``require_overlap=True`` drops scenes with no overlap at all (logged, like
+    the enrollment skips): they contribute zero extractor training signal.
     """
     import torch
 
@@ -73,9 +92,11 @@ def build_scene_crop_dataset(
         return {
             "scene": scene, "activity": activity, "solo": solo,
             "overlap": overlap, "w_overlap": w_overlap, "embeddings": embeddings,
+            "overlap_runs": _overlap_runs(overlap),
         }
 
     prepared = []
+    skipped_no_overlap: list[str] = []
     skipped: list[tuple[str, str]] = []  # (scene name, reason) -- enrollment can be
     # a slow, long-running pass over the whole dataset (one encoder forward pass per
     # solo clip per speaker per scene); a single speaker with no solo region -- or only
@@ -84,7 +105,7 @@ def build_scene_crop_dataset(
     # as they happen and in the summary below, rather than only surfacing at the end.
     for scene in dataset:
         try:
-            prepared.append(_prepare(scene))
+            item = _prepare(scene)
         except NoSoloRegionError as exc:
             # Only the benign "no usable solo audio" case is skip-worthy; a plain
             # ValueError (e.g. the overlap-contamination guard in dagger.enroll.topk)
@@ -92,7 +113,18 @@ def build_scene_crop_dataset(
             reason = str(exc)
             skipped.append((scene.name, reason))
             print(f"[enroll] skipping scene {scene.name!r}: {reason}")
+            continue
+        if require_overlap and item["overlap"].sum() == 0:
+            skipped_no_overlap.append(scene.name)
+            print(f"[crops] skipping scene {scene.name!r}: no overlap anywhere.")
+            continue
+        prepared.append(item)
 
+    if skipped_no_overlap:
+        print(
+            f"[crops] skipped {len(skipped_no_overlap)} scene(s) with no overlap "
+            f"(nothing for the extractor to learn from): {skipped_no_overlap}"
+        )
     if skipped:
         print(
             f"[enroll] skipped {len(skipped)}/{len(skipped) + len(prepared)} scenes "
@@ -111,7 +143,20 @@ def build_scene_crop_dataset(
             scene: Scene = item["scene"]
             n = scene.mixture.shape[0]
             seg = int(round(segment_seconds * scene.sample_rate))
-            start = 0 if n <= seg else int(rng.integers(0, n - seg + 1))
+            run_starts, run_cumlen = item["overlap_runs"]
+            if n <= seg:
+                start = 0
+            elif run_cumlen.size:
+                # Center the crop on a random overlap sample (uniform over all
+                # overlap samples: pick a global overlap index, map it into its
+                # run via the cumulative lengths).
+                k = int(rng.integers(0, run_cumlen[-1]))
+                run = int(np.searchsorted(run_cumlen, k, side="right"))
+                offset_in_run = k - (int(run_cumlen[run - 1]) if run else 0)
+                t = int(run_starts[run]) + offset_in_run
+                start = int(np.clip(t - seg // 2, 0, n - seg))
+            else:
+                start = int(rng.integers(0, n - seg + 1))
             end = start + seg
 
             def crop_1d(x: np.ndarray) -> np.ndarray:

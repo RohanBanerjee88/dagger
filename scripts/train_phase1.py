@@ -84,6 +84,7 @@ def train_proposed(cfg: dict, device: str) -> None:
         encoder=encoder,
         enroll_k=cfg.get("enroll", {}).get("k", 3),
         fade=fade,
+        require_overlap=True,  # a no-overlap scene has nothing for G to learn from
     )
     loader = torch.utils.data.DataLoader(
         crops, batch_size=cfg["train"]["batch_size"], shuffle=True
@@ -105,6 +106,18 @@ def train_proposed(cfg: dict, device: str) -> None:
 
             x_o = mixture * overlap  # shared hard-masked x_O, same as inference
 
+            # A (crop, speaker) term is scoreable only if the speaker's overlap
+            # window actually intersects the crop: SI-SDR is scale-invariant,
+            # so a ~zero windowed target cannot express "output silence" -- it
+            # degenerates to -10*log10(eps) (~+80) with a garbage gradient
+            # that swamps the real terms. Skip those terms and average the
+            # loss over the scoreable ones only.
+            windowed_targets = sources * w_overlap  # [B, S, T]
+            valid = windowed_targets.pow(2).sum(dim=-1) > 1e-8  # [B, S]
+            n_valid = int(valid.sum().item())
+            if n_valid == 0:
+                continue
+
             optimizer.zero_grad()
             # Backward per speaker so only one extractor graph is alive at a
             # time -- summing all speakers' losses before backward() holds
@@ -113,9 +126,15 @@ def train_proposed(cfg: dict, device: str) -> None:
             # the summed loss exactly.
             batch_loss = 0.0
             for i in range(num_speakers):
-                estimate = model(x_o, embeddings[:, i, :])
-                weight = w_overlap[:, i, :]
-                loss = si_sdr_loss(estimate * weight, sources[:, i, :] * weight) / num_speakers
+                sel = valid[:, i]
+                if not bool(sel.any()):
+                    continue
+                estimate = model(x_o[sel], embeddings[sel, i, :])
+                weight = w_overlap[sel, i, :]
+                per_item = si_sdr_loss(
+                    estimate * weight, sources[sel, i, :] * weight, reduction="none"
+                )
+                loss = per_item.sum() / n_valid
                 loss.backward()
                 batch_loss += float(loss.item())
             optimizer.step()
