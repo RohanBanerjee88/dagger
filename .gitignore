@@ -29,3 +29,8 @@ env/
 # Root-anchored so it only ignores a top-level data/ dir, NOT the dagger/data
 # Python package.
 /data/
+
+# Personal study notes — not part of the repo. Exception: theory.pdf is part
+# of the target layout (CLAUDE.md §4) and must stay committable.
+/docs/*
+!/docs/theory.pdf

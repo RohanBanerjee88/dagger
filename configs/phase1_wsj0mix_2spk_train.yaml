@@ -22,8 +22,8 @@ extractor:
   n_fft: 256
   hop_length: 64
   n_heads: 4
-  n_tokens: 4
-  cross_attn_blocks: 1
+  n_tokens: 8
+  cross_attn_blocks: 6   # fuse before every block (conditioning-collapse fix)
 
 train:
   system: proposed

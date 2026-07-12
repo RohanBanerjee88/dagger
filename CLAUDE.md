@@ -177,6 +177,54 @@ experiment needs both per-speaker solos *and* deep overlaps, so Phase 2 placemen
 small scheduler (e.g., per speaker: one guaranteed solo segment + one deliberately deep
 overlapped segment) — the solo-aware offset fix above is not sufficient for Phase 2.
 
+**⚠ KNOWN ISSUE (found 2026-07-11, first full training run): degenerate loss terms drowned the
+training signal for `G`.** Symptoms: training loss flat at ~40 (i.e. −40 dB SI-SDR — worse than
+outputting the mixture, impossible for a real comparison) for 25 epochs, and proposed vs blind
+eval rows agreeing within ~0.3 dB — two different architectures both stuck near passthrough.
+Cause: uniform-random 4 s training crops usually miss a given speaker's overlap window, and
+SI-SDR is *scale-invariant*, so a ~zero windowed target can't express "output silence" — the
+term degenerates to `−10·log10(eps)` (~+80) with a garbage gradient that swamps the scoreable
+terms. The `min_solo` fix made this *more* common (it reduces overlap by design). Same disease,
+milder, in the blind system's PIT loss (silent speaker in crop).
+*Fixed (2026-07-11):* (a) `scripts/train_phase1.py` masks out (crop, speaker) terms whose
+windowed target has ~zero energy and averages over scoreable terms only (skipped terms also
+skip their forward pass); (b) `dagger/losses/pit.py` masks silent target speakers out of the
+per-item mean and drops all-silent items; (c) `dagger/data/torch_adapter.py` centers each crop
+on a random overlap sample (uniform over overlap samples via precomputed run boundaries;
+uniform-start fallback when a scene has no overlap), and `require_overlap=True` (used by
+proposed training) drops zero-overlap scenes with a logged count — such scenes still exist
+because the `min_solo` guarantee can push short utterances fully clear of the chain; at eval
+they appear as `overlap: n/a` rows (speaker is 100% copy-path), which is correct behavior.
+Healthy-training signature going forward: loss starts ~5–15 and *trends down*; a flat loss
+near +40 means degenerate terms are back.
+
+**⚠ OPEN ISSUE (found 2026-07-11, second full training run, after the loss fixes): the proposed
+extractor collapses to passthrough — its embedding conditioning is not being used.** Evidence:
+with the fixed losses, the **blind** baseline now trains cleanly (loss 0.36 → −2.26 over 25
+epochs; eval overlap SI-SDR 0.01 → 2.26 dB), but the **proposed** system's loss oscillates
+around 0.1–0.7 with no trend, and its eval `overlap(prop)` column is identical (±0.01 dB)
+across two independently trained runs — only possible if both runs output ≈ a scaled copy of
+`x_O` (SI-SDR is scale-invariant, so every `c·x_O` scores exactly what the mixture scores).
+Mechanism: one output head is asked for three different answers from the *same* input,
+disambiguated only by `ē_i`; if the conditioning pathway is too weak to matter early, the three
+per-speaker gradients on identical input cancel and "output the mixture" is a stable resting
+point (the blind system escapes because its 3 PIT-matched heads can specialize without
+conflicting gradients). No wiring bug found in `extract/tfgridnet_crossattn.py` /
+`extract/crossattn.py` / `extract/tfgridnet.py` — the suspicion is *dosage*, not design:
+config injects the fusion before only **1 of 6** blocks (`cross_attn_blocks: 1`; the backbone
+already supports fusing before every block), the 192-d embedding is compressed to only
+`n_tokens: 4` key/value tokens, and raw (unnormalized) TitaNet embeddings feed `token_proj`
+(early noisy FiLM scales incentivize the optimizer to mute the pathway).
+*Next actions (diagnose before spending GPU):* (1) embedding-sensitivity probe on the saved
+checkpoint — `G(x, e_A)` vs `G(x, e_B)` vs `G(x, random)`; near-identical outputs confirm the
+collapse; (2) overfit-4-scenes test — if proposed cannot drive its loss strongly negative even
+when memorizing, the conditioning pathway is underpowered; (3) if confirmed, remedies in order:
+`cross_attn_blocks: 6` (one YAML line), L2-normalize the embedding before `token_proj`,
+`n_tokens: 8`, then retrain. Note the current blind-beats-proposed table is **not** a DoD
+verdict: blind gets oracle best-permutation matching, and proposed's 0.13 dB is a passthrough
+artifact, not a measurement of a working extractor — the Phase 1 comparison hasn't actually
+been run yet.
+
 ### ☐ Phase 2 — THE money experiment (validates: accumulation-free reconstruction)
 
 **Goal:** prove the central claim empirically.
@@ -261,5 +309,6 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-11 — documented the `stagger_offsets` solo-starvation issue on 3+ speakers
-(Phase 1 known issue) and the solo-vs-depth placement tension it implies for Phase 2.*
+*Last updated: 2026-07-11 — added the OPEN conditioning-collapse issue (proposed extractor stuck
+at passthrough; blind trains fine after the loss fixes) with its diagnosis plan. Earlier the same
+day: documented + fixed `stagger_offsets` solo starvation and the degenerate-loss-terms issue.*

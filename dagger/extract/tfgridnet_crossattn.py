@@ -22,8 +22,11 @@ DEFAULT_CONFIG = {
     "hop_length": 64,
     "n_heads": 4,
     "embed_dim": 192,  # TitaNet-Large's embedding dimension
-    "n_tokens": 4,
-    "cross_attn_blocks": 1,
+    # Conditioning dosage: fuse before *every* block and use 8 speaker tokens.
+    # The original 1-block / 4-token setting let the extractor collapse to
+    # passthrough (CLAUDE.md Phase 1 conditioning-collapse issue).
+    "n_tokens": 8,
+    "cross_attn_blocks": 4,  # = n_blocks: keep these equal when overriding
 }
 
 

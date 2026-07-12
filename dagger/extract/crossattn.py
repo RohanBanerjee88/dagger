@@ -35,6 +35,11 @@ def build_speaker_conditioned_cross_attention(
         def forward(self, mixture_feats, embedding):
             # mixture_feats: [B, C, F, T], embedding: [B, embed_dim]
             b, c, f, t = mixture_feats.shape
+            # TitaNet embeddings arrive unnormalized; without this, their
+            # magnitude spread makes early FiLM scales noisy and the optimizer
+            # learns to mute the conditioning pathway (CLAUDE.md Phase 1
+            # conditioning-collapse issue).
+            embedding = nn.functional.normalize(embedding, dim=-1)
             tokens = self.token_proj(embedding).view(b, self.n_tokens, c)
             query = mixture_feats.permute(0, 2, 3, 1).reshape(b, f * t, c)
             attn_out, _ = self.attn(query, tokens, tokens)
