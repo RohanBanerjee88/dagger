@@ -12,7 +12,7 @@ dataset:
   metadata: metadata/Libri3Mix/libri3mix_train-360.csv   # under DAGGER_DATA_ROOT
   n_src: 3
   overlap: 0.5
-  limit: null   # full training split
+  limit: 2000   # sized for one Kaggle T4 batch session (~7 h with prep); full 50k split doesn't fit
 
 enroll:
   k: 3
@@ -30,9 +30,12 @@ extractor:
 
 train:
   system: proposed        # run once with proposed, once with blind
-  epochs: 100
-  batch_size: 8
+  epochs: 30
+  batch_size: 4     # batch 8 OOMs a 15 GB T4 with per-speaker backward
   segment_seconds: 4.0
   lr: 0.0003        # 1e-3 never escaped the passthrough plateau (overfit-4 diagnostic, 2026-07-12)
-  grad_clip: 5.0    # max grad norm; null disables
+  grad_clip: 10.0   # max grad norm; null disables. 5.0 blanket-rescaled 93-99% of late-run
+                    # steps once healthy medians hit ~10; 10.0 frees those while still cutting
+                    # the 150-370 spikes. Validate via the per-epoch grad_norm log line.
+  checkpoint_every: 5   # overwriting mid-run saves; insurance for long sessions
   checkpoint_out: checkpoints/phase1/proposed_librimix_3spk.pt

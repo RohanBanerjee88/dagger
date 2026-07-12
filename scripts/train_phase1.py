@@ -49,6 +49,17 @@ def _device(preferred: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _save_checkpoint(model, model_config: dict, system: str, path: Path) -> None:
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"state_dict": model.state_dict(), "model_config": model_config,
+         "phase": "1", "system": system},
+        path,
+    )
+
+
 def _grad_norm_summary(norms: list[float], clip: float | None) -> str:
     """Epoch-log suffix describing pre-clip gradient norms.
 
@@ -112,6 +123,8 @@ def train_proposed(cfg: dict, device: str) -> None:
     model = build_tfgridnet_crossattn_module(cfg.get("extractor", {})).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"])
     grad_clip = cfg["train"].get("grad_clip", 5.0)
+    checkpoint_every = cfg["train"].get("checkpoint_every", 5)
+    checkpoint_out = _checkpoint_path(cfg, "proposed")
 
     for epoch in range(cfg["train"]["epochs"]):
         total_loss = 0.0
@@ -178,14 +191,13 @@ def train_proposed(cfg: dict, device: str) -> None:
             f"[proposed] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}"
             f"{_grad_norm_summary(grad_norms, grad_clip)}"
         )
+        # Periodic (overwriting) save so an interrupted long run keeps its
+        # latest state instead of losing everything to the end-only save.
+        if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
+            _save_checkpoint(model, cfg.get("extractor", {}), "proposed", checkpoint_out)
+            print(f"[proposed] checkpoint saved @ epoch {epoch + 1} -> {checkpoint_out}")
 
-    checkpoint_out = _checkpoint_path(cfg, "proposed")
-    checkpoint_out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {"state_dict": model.state_dict(), "model_config": cfg.get("extractor", {}),
-         "phase": "1", "system": "proposed"},
-        checkpoint_out,
-    )
+    _save_checkpoint(model, cfg.get("extractor", {}), "proposed", checkpoint_out)
     print(f"saved checkpoint to {checkpoint_out}")
 
 
@@ -208,6 +220,8 @@ def train_blind(cfg: dict, device: str) -> None:
     model = build_blind_separator_module(extractor_cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"])
     grad_clip = cfg["train"].get("grad_clip", 5.0)
+    checkpoint_every = cfg["train"].get("checkpoint_every", 5)
+    checkpoint_out = _checkpoint_path(cfg, "blind")
 
     for epoch in range(cfg["train"]["epochs"]):
         total_loss = 0.0
@@ -236,14 +250,11 @@ def train_blind(cfg: dict, device: str) -> None:
             f"[blind] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}"
             f"{_grad_norm_summary(grad_norms, grad_clip)}"
         )
+        if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
+            _save_checkpoint(model, extractor_cfg, "blind", checkpoint_out)
+            print(f"[blind] checkpoint saved @ epoch {epoch + 1} -> {checkpoint_out}")
 
-    checkpoint_out = _checkpoint_path(cfg, "blind")
-    checkpoint_out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {"state_dict": model.state_dict(), "model_config": extractor_cfg,
-         "phase": "1", "system": "blind"},
-        checkpoint_out,
-    )
+    _save_checkpoint(model, extractor_cfg, "blind", checkpoint_out)
     print(f"saved checkpoint to {checkpoint_out}")
 
 
