@@ -1,0 +1,48 @@
+# Phase 1 -- overfit-4-scenes DIAGNOSTIC (CLAUDE.md Phase 1 open issue, next
+# action (2)). NOT a benchmark: trains the proposed extractor to memorize 4
+# scenes to decide whether the passthrough collapse is an optimization problem
+# or a structural one.
+#
+# Read the result together with scripts/probe_phase1_conditioning.py run on
+# the saved checkpoint (checkpoints/phase1/proposed_overfit4_diag.pt):
+# - loss strongly negative (< ~-5) AND probe shows diag > off-diag
+#     -> architecture can condition; the 400-scene failure is optimization.
+#        Remedy: lower LR / grad clipping / longer training. No code changes.
+# - loss stuck near 0 even while memorizing
+#     -> passthrough attractor is structural. Remedy: aux speaker-consistency
+#        loss, silent-target energy terms, or mixture dropout.
+#
+# lr is already 3e-4 here (not the main config's 1e-3) so an optimizer-
+# instability failure can't masquerade as a structural one.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_train-360.csv   # under DAGGER_DATA_ROOT
+  n_src: 3
+  overlap: 0.5
+  limit: 4      # the whole point: memorize these
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6   # fuse before every block (conditioning-collapse fix)
+  num_speakers: 3   # blind baseline only; proposed extractor ignores this
+
+train:
+  system: proposed
+  epochs: 600       # 4 scenes -> 1 batch/epoch; ~600 steps total, ~10-15 min on a T4
+  batch_size: 4
+  segment_seconds: 4.0
+  lr: 0.0003
+  checkpoint_out: checkpoints/phase1/overfit4_diag.pt   # saved as proposed_overfit4_diag.pt
