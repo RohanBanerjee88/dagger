@@ -89,9 +89,19 @@ def build_scene_crop_dataset(
                 ],
                 axis=0,
             )
+        # Store compactly: __getitem__ serves float32 tensors regardless, and
+        # the masks are 0/1 -- keeping the float64 originals (plus the whole
+        # Scene object) is ~112 bytes/sample and OOMs the host RAM near
+        # ~2000 scenes. float32 audio + uint8 masks is ~35 bytes/sample.
         return {
-            "scene": scene, "activity": activity, "solo": solo,
-            "overlap": overlap, "w_overlap": w_overlap, "embeddings": embeddings,
+            "mixture": scene.mixture.astype(np.float32),
+            "sources": scene.sources.astype(np.float32),
+            "sample_rate": scene.sample_rate,
+            "activity": activity.astype(np.uint8),
+            "solo": solo.astype(np.uint8),
+            "overlap": overlap.astype(np.uint8),
+            "w_overlap": w_overlap.astype(np.float32),
+            "embeddings": embeddings,
             "overlap_runs": _overlap_runs(overlap),
         }
 
@@ -140,9 +150,8 @@ def build_scene_crop_dataset(
 
         def __getitem__(self, idx: int):
             item = prepared[idx]
-            scene: Scene = item["scene"]
-            n = scene.mixture.shape[0]
-            seg = int(round(segment_seconds * scene.sample_rate))
+            n = item["mixture"].shape[0]
+            seg = int(round(segment_seconds * item["sample_rate"]))
             run_starts, run_cumlen = item["overlap_runs"]
             if n <= seg:
                 start = 0
@@ -169,8 +178,8 @@ def build_scene_crop_dataset(
                 return np.stack([crop_1d(row) for row in x], axis=0)
 
             sample = {
-                "mixture": torch.as_tensor(crop_1d(scene.mixture), dtype=torch.float32),
-                "sources": torch.as_tensor(crop_2d(scene.sources), dtype=torch.float32),
+                "mixture": torch.as_tensor(crop_1d(item["mixture"]), dtype=torch.float32),
+                "sources": torch.as_tensor(crop_2d(item["sources"]), dtype=torch.float32),
                 "activity": torch.as_tensor(crop_2d(item["activity"]), dtype=torch.float32),
                 "solo": torch.as_tensor(crop_2d(item["solo"]), dtype=torch.float32),
                 "overlap": torch.as_tensor(crop_1d(item["overlap"]), dtype=torch.float32),
