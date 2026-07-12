@@ -28,6 +28,7 @@ Reproduce with::
 from __future__ import annotations
 
 import argparse
+import statistics
 import sys
 from pathlib import Path
 
@@ -46,6 +47,24 @@ def _device(preferred: str | None) -> str:
     if preferred:
         return preferred
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _grad_norm_summary(norms: list[float], clip: float | None) -> str:
+    """Epoch-log suffix describing pre-clip gradient norms.
+
+    Exists to validate the ``train.grad_clip`` threshold empirically: healthy
+    is a median comfortably below the clip with a small clipped-% (outlier
+    protection only); a median at/above the clip means every step is being
+    rescaled -- i.e. the clip is acting as a hidden LR reduction -- so raise it.
+    """
+    if not norms:
+        return ""
+    med = statistics.median(norms)
+    mx = max(norms)
+    if clip is None:
+        return f"  grad_norm: median={med:.2f} max={mx:.2f} (clip off)"
+    frac = 100.0 * sum(n > clip for n in norms) / len(norms)
+    return f"  grad_norm: median={med:.2f} max={mx:.2f} clipped={frac:.0f}%"
 
 
 def _checkpoint_path(cfg: dict, system: str) -> Path:
@@ -92,10 +111,12 @@ def train_proposed(cfg: dict, device: str) -> None:
 
     model = build_tfgridnet_crossattn_module(cfg.get("extractor", {})).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"])
+    grad_clip = cfg["train"].get("grad_clip", 5.0)
 
     for epoch in range(cfg["train"]["epochs"]):
         total_loss = 0.0
         n_batches = 0
+        grad_norms: list[float] = []
         for batch in loader:
             mixture = batch["mixture"].to(device)
             overlap = batch["overlap"].to(device)
@@ -137,13 +158,26 @@ def train_proposed(cfg: dict, device: str) -> None:
                 loss = per_item.sum() / n_valid
                 loss.backward()
                 batch_loss += float(loss.item())
+            # A single unclipped step can undo hundreds of good ones (the
+            # +1-to-+2 loss spikes in otherwise-descending runs); clip the
+            # accumulated gradient once, right before the step. max_norm=inf
+            # when disabled -- a no-op that still returns the pre-clip norm
+            # for the epoch log.
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=grad_clip if grad_clip is not None else float("inf"),
+            )
+            grad_norms.append(float(total_norm))
             optimizer.step()
 
             total_loss += batch_loss
             n_batches += 1
 
         mean_loss = total_loss / max(n_batches, 1)
-        print(f"[proposed] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}")
+        print(
+            f"[proposed] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}"
+            f"{_grad_norm_summary(grad_norms, grad_clip)}"
+        )
 
     checkpoint_out = _checkpoint_path(cfg, "proposed")
     checkpoint_out.parent.mkdir(parents=True, exist_ok=True)
@@ -173,10 +207,12 @@ def train_blind(cfg: dict, device: str) -> None:
     extractor_cfg.setdefault("num_speakers", cfg["dataset"].get("n_src", 2))
     model = build_blind_separator_module(extractor_cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"])
+    grad_clip = cfg["train"].get("grad_clip", 5.0)
 
     for epoch in range(cfg["train"]["epochs"]):
         total_loss = 0.0
         n_batches = 0
+        grad_norms: list[float] = []
         for batch in loader:
             mixture = batch["mixture"].to(device)
             sources = batch["sources"].to(device)
@@ -185,13 +221,21 @@ def train_blind(cfg: dict, device: str) -> None:
             estimates = model(mixture)
             loss = pit_loss(estimates, sources)
             loss.backward()
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=grad_clip if grad_clip is not None else float("inf"),
+            )
+            grad_norms.append(float(total_norm))
             optimizer.step()
 
             total_loss += float(loss.item())
             n_batches += 1
 
         mean_loss = total_loss / max(n_batches, 1)
-        print(f"[blind] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}")
+        print(
+            f"[blind] epoch {epoch + 1}/{cfg['train']['epochs']}  loss={mean_loss:.4f}"
+            f"{_grad_norm_summary(grad_norms, grad_clip)}"
+        )
 
     checkpoint_out = _checkpoint_path(cfg, "blind")
     checkpoint_out.parent.mkdir(parents=True, exist_ok=True)

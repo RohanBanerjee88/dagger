@@ -33,5 +33,6 @@ train:
   epochs: 100
   batch_size: 8
   segment_seconds: 4.0
-  lr: 0.001
+  lr: 0.0003        # 1e-3 never escaped the passthrough plateau (overfit-4 diagnostic, 2026-07-12)
+  grad_clip: 5.0    # max grad norm; null disables
   checkpoint_out: checkpoints/phase1/proposed_librimix_3spk.pt

@@ -224,6 +224,25 @@ when memorizing, the conditioning pathway is underpowered; (3) if confirmed, rem
 verdict: blind gets oracle best-permutation matching, and proposed's 0.13 dB is a passthrough
 artifact, not a measurement of a working extractor — the Phase 1 comparison hasn't actually
 been run yet.
+*Diagnosed (2026-07-12): the architecture is fine — the failure is optimization (passthrough
+is a plateau the optimizer must escape, and at lr 1e-3 it never does).* Evidence chain:
+(a) the dosage remedies (`cross_attn_blocks: 6`, L2-norm in the fusion module, `n_tokens: 8`)
+were applied and a fresh capped run (400 scenes / 25 epochs) *still* landed at 0.14 dB overlap —
+third run within 0.01 dB of passthrough; (b) the embedding-sensitivity probe
+(`scripts/probe_phase1_conditioning.py`) on that checkpoint showed the pathway ALIVE but not
+steering (outputs change ~5% when swapping embeddings; SI-SDR vs `x_O` = 35.8 dB ≈ scaled
+mixture copy; diag−offdiag margin 0.16 dB ≈ 0); (c) the overfit-4-scenes run
+(`configs/phase1_overfit4_diag.yaml`, lr 3e-4, 600 single-batch epochs) sat at the passthrough
+plateau for ~170 steps, then **escaped**: final loss ~−2 to −3, and the probe on its checkpoint
+returned STEERS (outputs change 86% across embeddings, passthrough down to 8.1 dB, diag
++2.38 dB vs offdiag −3.04 dB — pointing G at speaker j actively suppresses speaker i).
+Structural remedies (aux speaker-consistency loss, silent-target energy terms, mixture
+dropout) are NOT needed on current evidence. *Remedy applied (2026-07-12):* `lr: 3e-4` in the
+train config and gradient clipping (`train.grad_clip`, default max-norm 5.0, both systems) in
+`scripts/train_phase1.py` — the overfit log showed single unclipped steps (+1-to-+2 loss
+spikes) repeatedly erasing hundreds of steps of descent. Retrain pending. Expect a plateau
+phase near ~0.3–0.5 loss before escape; a run has failed only if it is still flat at the END,
+not because it starts flat.
 
 ### ☐ Phase 2 — THE money experiment (validates: accumulation-free reconstruction)
 
@@ -309,6 +328,6 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-11 — added the OPEN conditioning-collapse issue (proposed extractor stuck
-at passthrough; blind trains fine after the loss fixes) with its diagnosis plan. Earlier the same
-day: documented + fixed `stagger_offsets` solo starvation and the degenerate-loss-terms issue.*
+*Last updated: 2026-07-12 — conditioning-collapse issue DIAGNOSED via probe + overfit-4 test:
+architecture steers correctly; failure was optimization (passthrough plateau at lr 1e-3).
+Remedy applied: lr 3e-4 + gradient clipping in `train_phase1.py`; retrain pending.*
