@@ -8,7 +8,7 @@ dataset:
   metadata: metadata/Libri3Mix/libri3mix_test.csv   # under DAGGER_DATA_ROOT
   n_src: 3
   overlap: 0.5
-  limit: 50
+  limit: 150   # DoD table: blind seed variance was ~1.2 dB on 50 scenes; 450 paired rows tighten the mean
 
 enroll:
   k: 3
