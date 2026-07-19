@@ -138,7 +138,7 @@ or sample-rate/framerate misalignment between diarization masks and audio frames
 **Definition of done:** one command runs mixture → (oracle regions) → copied-solo output →
 metrics, on a handful of files, with sane numbers.
 
-### ☐ Phase 1 — Identity conditioning (validates: targeting beats blind separation)
+### ☑ Phase 1 — Identity conditioning (validates: targeting beats blind separation) — DoD MET 2026-07-13
 
 **Goal:** extract each speaker from the mixture using their embedding. **No recursion yet.**
 
@@ -243,6 +243,22 @@ train config and gradient clipping (`train.grad_clip`, default max-norm 5.0, bot
 spikes) repeatedly erasing hundreds of steps of descent. Retrain pending. Expect a plateau
 phase near ~0.3–0.5 loss before escape; a run has failed only if it is still flat at the END,
 not because it starts flat.
+*RESOLVED (2026-07-13): Phase 1 DoD met.* The lr 3e-4 + grad-clip retrain escaped the plateau
+(400 scenes/25 epochs: 1.75 dB vs blind's 1.03; probe on *test* scenes: STEERS). Scaled runs
+(Kaggle batch, one T4 each: `limit: 2000, epochs: 30, batch 4, lr 3e-4, grad_clip 10`;
+`torch_adapter` now stores crops compactly — float32 audio + uint8 masks, ~3× less host RAM —
+after the prepared-scenes list OOMed ~30 GB at 2000 scenes) produced the DoD table
+(150 test scenes, 450 rows):
+**proposed 4.40 dB vs blind 2.05 dB mean overlap SI-SDR (+2.35 dB)**; probe: passthrough
+2.89 dB, diag +5.80 vs off-diag −6.95 (12.8 dB steering margin — grew with data: 5.6 dB at
+400 scenes). Caveats recorded honestly: (a) per-row win rate is only 50% (paired std 7.51 dB) —
+the mean margin comes from magnitude asymmetry (proposed's wins are much larger than its
+losses); Phase 2's depth stratification should locate where the big wins live; (b) both
+systems are undertrained (2000 of ~34k Libri3Mix train-360 recipes; loss still descending at
+cutoff) so all numbers are lower bounds; (c) the 2-speaker WSJ0-2mix literature-bar check is
+deferred — no LDC license — substitute Libri2Mix if ever needed. Reproduce: train both systems
+with `configs/phase1_librimix_3spk_train.yaml` (`--system proposed|blind`), eval with
+`scripts/run_phase1.py --config configs/phase1_librimix_3spk_eval.yaml` (limit 150).
 
 ### ☐ Phase 2 — THE money experiment (validates: accumulation-free reconstruction)
 
@@ -328,6 +344,9 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-12 — conditioning-collapse issue DIAGNOSED via probe + overfit-4 test:
-architecture steers correctly; failure was optimization (passthrough plateau at lr 1e-3).
-Remedy applied: lr 3e-4 + gradient clipping in `train_phase1.py`; retrain pending.*
+*Last updated: 2026-07-13 — PHASE 1 DoD MET: proposed 4.40 dB vs blind 2.05 dB overlap SI-SDR
+(3-spk Libri3Mix, oracle diarization, 150 test scenes) after scaled 2000-scene batch runs;
+probe steering margin 12.8 dB. Conditioning-collapse saga closed (root cause: optimization,
+fixed with lr 3e-4 + grad clipping). Next: Phase 2 — note the placement-scheduler prerequisite
+in the Phase 1 known-issue block (chain staggering can't produce depth-3 overlaps alongside
+per-speaker solos).*
