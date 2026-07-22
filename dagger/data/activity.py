@@ -125,6 +125,37 @@ def segments_from_sources(
     return segments
 
 
+def segments_from_chunks(
+    chunks: list[list[tuple[int, int, int]]],
+    speakers: list[str],
+    sample_rate: int,
+) -> list[Segment]:
+    """Exact oracle segments from scheduled multi-chunk placements.
+
+    Generalizes :func:`segments_from_placement` to more than one contiguous
+    placement window per speaker, as produced by
+    :func:`dagger.data.mixing.schedule_solo_then_overlap` (CLAUDE.md §5 Phase 2's
+    scene scheduler: a solo slot plus a separate deep-overlap tail). Multiple
+    :class:`Segment` objects per speaker are fine -- :func:`activity_matrix`
+    just ORs them into that speaker's row.
+    """
+    if len(chunks) != len(speakers):
+        raise ValueError("chunks and speakers must have equal length.")
+    segments: list[Segment] = []
+    for speaker, speaker_chunks in zip(speakers, chunks):
+        for offset, _src_start, chunk_len in speaker_chunks:
+            if chunk_len <= 0:
+                continue
+            segments.append(
+                Segment(
+                    speaker=speaker,
+                    start=offset / sample_rate,
+                    duration=chunk_len / sample_rate,
+                )
+            )
+    return segments
+
+
 def segments_from_placement(
     offsets: list[int],
     lengths: list[int],

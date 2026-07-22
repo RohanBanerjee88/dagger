@@ -16,6 +16,9 @@ Config block (``cfg["dataset"]``):
     n_src: 2                # 2 or 3
     overlap: 0.5            # staggered-overlap fraction (mixing.stagger_offsets)
     limit: 8               # cap the number of scenes (a handful for Phase 0)
+    placement: chain        # "chain" (default, Phase 0/1) or "scheduled" (Phase 2:
+                             # guaranteed per-speaker solo + a synchronized deep-
+                             # overlap zone -- see mixing.schedule_solo_then_overlap)
 """
 
 from __future__ import annotations
@@ -25,10 +28,15 @@ from pathlib import Path
 
 import numpy as np
 
-from dagger.data.activity import segments_from_placement
+from dagger.data.activity import segments_from_chunks, segments_from_placement
 from dagger.data.audio_io import read_wav
 from dagger.data.base import Scene, SceneDataset
-from dagger.data.mixing import mix_sources, stagger_offsets
+from dagger.data.mixing import (
+    mix_scheduled_sources,
+    mix_sources,
+    schedule_solo_then_overlap,
+    stagger_offsets,
+)
 from dagger.data.paths import resolve_data_root
 
 
@@ -73,6 +81,9 @@ class LibriMixDataset(SceneDataset):
         # comfortably above enrollment's min_clip_ms=500 default, so 3-mix scenes
         # stop being skipped for lack of solo audio.
         self.min_solo = int(round(float(cfg.get("min_solo_ms", 1000.0)) / 1000.0 * self.sample_rate))
+        self.placement = str(cfg.get("placement", "chain"))
+        if self.placement not in ("chain", "scheduled"):
+            raise ValueError(f"placement must be 'chain' or 'scheduled', got {self.placement!r}.")
         self.limit = cfg.get("limit")
         self.data_root = resolve_data_root()
         self.metadata = self.data_root / str(cfg["metadata"])
@@ -106,11 +117,18 @@ class LibriMixDataset(SceneDataset):
             gains.append(float(row.get(f"source_{k}_gain", 1.0)))
 
         lengths = [len(s) for s in sources_raw]
-        offsets = stagger_offsets(lengths, self.overlap, min_solo=self.min_solo)
-        sources, mixture = mix_sources(
-            sources_raw, gains=gains, offsets=offsets, length_mode="max"
-        )
-        segments = segments_from_placement(offsets, lengths, speakers, self.sample_rate)
+        if self.placement == "scheduled":
+            chunks = schedule_solo_then_overlap(lengths, min_solo=self.min_solo)
+            sources, mixture = mix_scheduled_sources(
+                sources_raw, chunks, gains=gains, length_mode="max"
+            )
+            segments = segments_from_chunks(chunks, speakers, self.sample_rate)
+        else:
+            offsets = stagger_offsets(lengths, self.overlap, min_solo=self.min_solo)
+            sources, mixture = mix_sources(
+                sources_raw, gains=gains, offsets=offsets, length_mode="max"
+            )
+            segments = segments_from_placement(offsets, lengths, speakers, self.sample_rate)
         return Scene(
             mixture=mixture,
             sources=sources,

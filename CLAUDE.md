@@ -278,6 +278,43 @@ raw leakage instead of the margin; refinement with no gate accepting bad embeddi
 **Definition of done:** the depth-stratified plot clearly shows flat (ours) vs sloped (deflation),
 and ordering proposed ≥ gated > ungated on 3+ speakers.
 
+**Status (2026-07-22): code + unit tests landed, real-data run still pending.** All Phase 2
+components are implemented and unit-tested (synthetic fixtures only, no GPU/data needed;
+`pytest tests/phase2/` green, full suite 194 passed) but the actual depth-stratified DoD table/
+plot has NOT been generated yet — that needs the mounted LibriMix data + the existing Phase 1
+checkpoint, a follow-up run (same Kaggle-style workflow as Phase 1). System naming, to avoid
+confusion with Phase 1's "proposed" (= this phase's `no_recursion`):
+
+- `no_recursion` — exactly Phase 1's proposed path, unchanged.
+- `ungated_deflation` / `gated_deflation` — the deliberate residual anti-pattern (CLAUDE.md §1),
+  built only for comparison. Isolated in `dagger/reconstruct/deflation.py`, which is the ONLY
+  place in the repo allowed to feed a residual into `G` (via `_extract_from_residual`, which
+  bypasses `Extractor.extract()`'s guard on purpose). `dagger/refine/coarse_to_fine.py` never
+  imports it (enforced by an `ast`-based test) and never imports `TrackedSignal`/`Provenance` at
+  all, so it is structurally incapable of building a residual.
+- `coarse_to_fine` — "ours": recursion refines the embedding only (`dagger/refine/coarse_to_fine.py`),
+  every round's audio comes from the unmodified, guarded `reconstruct_all`.
+
+No retraining for Phase 2 — all four systems condition the one Phase 1 checkpoint
+(`checkpoints/phase1/proposed_librimix_3spk.pt`) differently at inference time.
+
+**New scene scheduler** (`dagger.data.mixing.schedule_solo_then_overlap`, config key
+`dataset.placement: scheduled`, default remains `"chain"` = Phase 0/1 behavior unchanged): gives
+every speaker a guaranteed non-overlapping solo slot, then places every speaker's remaining audio
+starting at the same synchronized offset, reaching depth == num_speakers before tapering as
+shorter clips end. Needed because the Phase 0/1 chain-staggered mixer cannot give a speaker both
+solo time and participation in a 3-way overlap in the same scene (see the Phase 1 "heads-up" note
+above). Works with existing Libri3Mix metadata — no new corpus/metadata needed.
+
+**Remaining before DoD can be marked done:** run `scripts/run_phase2.py --config
+configs/phase2_librimix_3spk_eval.yaml` against real Libri3Mix data + the Phase 1 checkpoint,
+inspect the depth-stratified table (`results/phase2_librimix_3spk_3spk.csv`/`.md`) and plot
+(`scripts/plot_phase2_depth.py`, needs the new `viz` extra), and confirm the ordering
+(`coarse_to_fine ≥ gated_deflation > ungated_deflation` at the deepest depth) and the flat-vs-
+sloped shape actually hold — gate thresholds in `configs/phase2_librimix_3spk_eval.yaml` (`tau_margin`,
+`max_mean_variance`, `min_vad_coverage`, `max_artifact_score`) are untuned defaults and will
+likely need adjustment once real numbers come back.
+
 ### ☐ Phase 3 — Real diarization + robustness
 
 **Goal:** survive imperfect, real diarization.
@@ -344,9 +381,10 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-13 — PHASE 1 DoD MET: proposed 4.40 dB vs blind 2.05 dB overlap SI-SDR
-(3-spk Libri3Mix, oracle diarization, 150 test scenes) after scaled 2000-scene batch runs;
-probe steering margin 12.8 dB. Conditioning-collapse saga closed (root cause: optimization,
-fixed with lr 3e-4 + grad clipping). Next: Phase 2 — note the placement-scheduler prerequisite
-in the Phase 1 known-issue block (chain staggering can't produce depth-3 overlaps alongside
-per-speaker solos).*
+*Last updated: 2026-07-22 — Phase 2 code + unit tests landed (scene scheduler, depth utility,
+gate module, deflation baselines, coarse-to-fine refinement, `si_sdr_by_depth`,
+`scripts/run_phase2.py`/`plot_phase2_depth.py`; full suite 194 passed). DoD NOT yet met — the
+real depth-stratified run against Libri3Mix + the Phase 1 checkpoint is the next step (see the
+Phase 2 status note above). Previously: 2026-07-13 — PHASE 1 DoD MET: proposed 4.40 dB vs blind
+2.05 dB overlap SI-SDR (3-spk Libri3Mix, oracle diarization, 150 test scenes) after scaled
+2000-scene batch runs; probe steering margin 12.8 dB.*

@@ -93,6 +93,17 @@ def activity_matrix(
     return activity, speakers
 
 
+def overlap_depth(activity: np.ndarray) -> np.ndarray:
+    """Per-sample count of concurrently active speakers ``|K|(t)``, shape ``[T]``.
+
+    This is the quantity Phase 2's depth-stratified metrics need (CLAUDE.md §5
+    Phase 2: "stratify every metric by overlap depth |K|"). ``solo_overlap_regions``
+    computes the same sum internally but only keeps its binarization
+    (``overlap = depth >= 2``); this function exposes the raw count.
+    """
+    return activity.sum(axis=0).astype(np.int64)
+
+
 def solo_overlap_regions(activity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Split activity into per-speaker solo masks and a shared overlap mask.
 

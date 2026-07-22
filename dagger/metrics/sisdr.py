@@ -63,6 +63,29 @@ def si_sdr_regionwise(
     return si_sdr(np.asarray(estimate)[mask], np.asarray(target)[mask])
 
 
+def si_sdr_by_depth(
+    estimate: np.ndarray,
+    target: np.ndarray,
+    depth: np.ndarray,
+) -> dict[int, float]:
+    """SI-SDR stratified by overlap depth ``|K|`` (CLAUDE.md §5 Phase 2: "stratify
+    every metric by overlap depth |K|" -- the evidence for the accumulation-free
+    claim, not aggregate averages).
+
+    ``depth`` (e.g. from :func:`dagger.diarize.oracle.overlap_depth`) is a
+    per-sample concurrent-speaker count aligned with ``estimate``/``target``.
+    Returns ``{k: si_sdr_regionwise(estimate, target, depth == k)}`` for every
+    ``k >= 1`` present in ``depth`` (depth 0 -- nobody active -- isn't scoreable
+    and is omitted).
+    """
+    depth = np.asarray(depth)
+    return {
+        int(k): si_sdr_regionwise(estimate, target, depth == k)
+        for k in sorted(np.unique(depth))
+        if k >= 1
+    }
+
+
 def si_sdr_best_permutation(
     estimates: np.ndarray,
     targets: np.ndarray,
