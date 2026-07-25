@@ -28,6 +28,8 @@ def identity_margin(
     embedding_self: np.ndarray,
     embeddings_others: list[np.ndarray],
     encoder: SpeakerEncoder,
+    *,
+    precomputed_embedding: np.ndarray | None = None,
 ) -> float:
     """``M_i`` for one speaker's extracted estimate.
 
@@ -35,10 +37,19 @@ def identity_margin(
     ``cos(s_hat_i, e_i) - max_j cos(s_hat_i, e_j)``. ``nan`` if there are no
     other speakers to compare against (margin is undefined for a single-speaker
     scene).
+
+    A caller that already embedded ``estimate`` for its own purposes (e.g.
+    :func:`dagger.refine.coarse_to_fine.refine_embeddings`, which re-embeds a
+    candidate clip before deciding whether to accept it) can pass that
+    embedding as ``precomputed_embedding`` to skip a redundant encoder call --
+    it must be ``encoder.embed(estimate, sample_rate)``, unchanged.
     """
     if not embeddings_others:
         return float("nan")
-    s_hat_i = encoder.embed(estimate, sample_rate)
+    s_hat_i = (
+        precomputed_embedding if precomputed_embedding is not None
+        else encoder.embed(estimate, sample_rate)
+    )
     same = cosine_similarity(s_hat_i, embedding_self)
     other = max(cosine_similarity(s_hat_i, e_j) for e_j in embeddings_others)
     return same - other

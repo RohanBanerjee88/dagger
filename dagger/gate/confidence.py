@@ -43,6 +43,7 @@ def confidence_gate(
     max_mean_variance: float,
     min_vad_coverage: float,
     max_artifact_score: float,
+    precomputed_embedding: np.ndarray | None = None,
 ) -> GateResult:
     """Accept/reject one speaker's extracted estimate ``ŝ_i``.
 
@@ -50,6 +51,11 @@ def confidence_gate(
     ``>=``/``<=`` comparison (NaN compares False against anything), so an
     undefined diagnostic (e.g. no other speakers to compare against) rejects
     rather than silently passing.
+
+    ``precomputed_embedding``, if the caller already has
+    ``encoder.embed(estimate, sample_rate)`` on hand, skips re-embedding
+    ``estimate`` inside :func:`identity_margin` -- see that function's
+    docstring for the exact contract.
     """
     if not enrollment_variance_ok(enrollment_variance, max_mean_variance):
         return GateResult(
@@ -57,7 +63,10 @@ def confidence_gate(
             artifact_score=float("nan"), reason="enrollment_variance",
         )
 
-    margin = identity_margin(estimate, sample_rate, embedding_self, embeddings_others, encoder)
+    margin = identity_margin(
+        estimate, sample_rate, embedding_self, embeddings_others, encoder,
+        precomputed_embedding=precomputed_embedding,
+    )
     coverage = vad_coverage(estimate, expected_active, sample_rate)
     artifact = spectral_flatness(estimate)
 

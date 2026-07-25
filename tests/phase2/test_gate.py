@@ -58,6 +58,29 @@ class TestIdentityMargin:
         margin = identity_margin(tone_a, SAMPLE_RATE, e_a, [], fake_encoder)
         assert np.isnan(margin)
 
+    def test_precomputed_embedding_is_used_instead_of_re_embedding(self, fake_encoder):
+        # A caller that already embedded `estimate` (e.g. coarse-to-fine, which
+        # re-embeds a refinement candidate before gating it) can pass that
+        # embedding through and skip a redundant encoder call. Prove it's
+        # actually used -- not silently ignored -- by passing a deliberately
+        # wrong one and checking the margin reflects it, not a fresh embed.
+        tone_a = make_tone(4000, 220.0)
+        tone_b = make_tone(4000, 880.0)
+        e_a = fake_encoder.embed(tone_a, SAMPLE_RATE)
+        e_b = fake_encoder.embed(tone_b, SAMPLE_RATE)
+
+        real_margin = identity_margin(tone_a, SAMPLE_RATE, e_a, [e_b], fake_encoder)
+        spoofed_margin = identity_margin(
+            tone_a, SAMPLE_RATE, e_a, [e_b], fake_encoder, precomputed_embedding=e_b
+        )
+        assert spoofed_margin != pytest.approx(real_margin)
+        # cos(e_b, e_a) - cos(e_b, e_b) == cos(e_b,e_a) - 1, i.e. the "self"
+        # similarity is now computed against a stand-in embedding of tone_b.
+        from dagger.metrics.speaker_similarity import cosine_similarity
+
+        expected = cosine_similarity(e_b, e_a) - cosine_similarity(e_b, e_b)
+        assert spoofed_margin == pytest.approx(expected)
+
 
 class TestArtifactChecks:
     def test_vad_coverage_full_when_estimate_matches_expected_active(self):

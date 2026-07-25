@@ -114,6 +114,10 @@ def refine_embeddings(
                 max_mean_variance=max_mean_variance,
                 min_vad_coverage=min_vad_coverage,
                 max_artifact_score=max_artifact_score,
+                # raw_embedding == encoder.embed(clip, sample_rate), computed
+                # just above -- avoids a redundant TitaNet call inside
+                # confidence_gate's margin check for the same clip.
+                precomputed_embedding=raw_embedding,
             )
             round_results[i] = result
             if result.accepted:
