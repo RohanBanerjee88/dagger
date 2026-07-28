@@ -1,0 +1,48 @@
+# Phase 2 -- fine-tune the Phase 1 checkpoint on `placement: scheduled` scenes
+# so G gets real depth-3 overlap exposure (Phase 1 trained/evaluated exclusively
+# on `placement: chain`, which per CLAUDE.md's Phase 1 "heads-up" note rarely
+# produces a genuine 3-way overlap -- the leading hypothesis for why the first
+# Phase 2 depth-stratified run showed a shared depth-3 crash across ALL four
+# systems, swamping the (correctly-signed) accumulation-vs-not gap). Same
+# scale as the original Phase 1 training run for comparability; warm-started
+# from that run's checkpoint rather than random init (see train.init_checkpoint
+# below and scripts/train_phase1.py's docstring).
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_train-360.csv   # under DAGGER_DATA_ROOT
+  n_src: 3
+  placement: scheduled   # the change under test -- see dagger.data.mixing.schedule_solo_then_overlap
+  min_solo_ms: 1000.0
+  limit: 2000   # matches the original Phase 1 training run's scale
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6   # MUST match checkpoints/phase1/proposed_librimix_3spk.pt's
+                         # architecture exactly -- load_state_dict raises otherwise
+
+train:
+  system: proposed
+  epochs: 30              # matches the original Phase 1 run's scale
+  batch_size: 4
+  segment_seconds: 4.0
+  lr: 0.0003              # unchanged from Phase 1 -- watch epoch-1 loss for a spike/instability
+                          # signature of the warm start destabilizing already-good weights;
+                          # lower this (e.g. 1e-4) on a rerun if that shows up
+  grad_clip: 10.0
+  checkpoint_every: 5
+  init_checkpoint: checkpoints/phase1/proposed_librimix_3spk.pt   # warm start, not random init
+  checkpoint_out: checkpoints/phase2/proposed_librimix_3spk_scheduled.pt   # NEW path -- never
+                                                                            # overwrites the Phase 1 checkpoint

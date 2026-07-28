@@ -20,6 +20,13 @@ from pathlib import Path
 
 SYSTEMS = ("no_recursion", "ungated_deflation", "gated_deflation", "coarse_to_fine")
 
+# Matches scripts/run_phase2.py's SI_SDR_CAP_DB: si_sdr() legitimately returns
+# +-inf (a perfect / a totally failed estimate -- see dagger.metrics.sisdr.si_sdr),
+# not "undefined." Only nan (speaker not active here) is excluded; +-inf are
+# clipped to this cap rather than silently dropped, so a handful of perfect
+# solo-copy rows can't vanish from the plotted mean.
+SI_SDR_CAP_DB = 50.0
+
 
 def _load_means(csv_path: Path) -> dict[str, dict[int, float]]:
     sums: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
@@ -27,8 +34,9 @@ def _load_means(csv_path: Path) -> dict[str, dict[int, float]]:
     with open(csv_path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             si_sdr = float(row["si_sdr"])
-            if si_sdr != si_sdr or si_sdr in (float("inf"), float("-inf")):  # skip nan/inf
+            if si_sdr != si_sdr:  # nan: speaker not active here, nothing to score
                 continue
+            si_sdr = max(-SI_SDR_CAP_DB, min(SI_SDR_CAP_DB, si_sdr))
             system, depth = row["system"], int(row["depth"])
             sums[system][depth] += si_sdr
             counts[system][depth] += 1

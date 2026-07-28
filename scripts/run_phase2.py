@@ -21,7 +21,9 @@ solo time AND the scene reaches a genuine depth-3 overlap:
 Every metric is stratified by overlap depth |K| (CLAUDE.md §5: "stratify every
 metric by overlap depth |K|" -- that's the evidence, not aggregate averages).
 Writes a long-format CSV (``scene, speaker, system, depth, si_sdr``) plus a
-summary ``.md`` to ``results/phase2_<dataset>_<n_src>spk.{csv,md}``. Reproduce
+summary ``.md`` to ``results/phase2_<dataset>_<n_src>spk[_<eval.tag>].{csv,md}``
+(``eval.tag``, optional, distinguishes runs against different checkpoints so
+one run never overwrites another's results). Reproduce
 with::
 
     DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase2.py \\
@@ -54,6 +56,23 @@ from dagger.reconstruct.stitch import reconstruct_all
 from dagger.refine.coarse_to_fine import refine_embeddings
 
 SYSTEMS = ("no_recursion", "ungated_deflation", "gated_deflation", "coarse_to_fine")
+
+# si_sdr() legitimately returns +-inf (a perfect estimate / a silent estimate
+# against real target energy -- see dagger.metrics.sisdr.si_sdr's docstring),
+# not "undefined." Only nan ("speaker not active here, nothing to score") should
+# be excluded from an aggregate mean; +-inf are real, informative outcomes and
+# get clipped to this cap so one perfect/failed row can't make the mean itself
+# +-inf. A plain np.isfinite() filter would silently drop both alongside nan --
+# that was a real Phase 2 bug (44% of depth-1 rows are exactly +inf, being
+# solo copy-through, and were vanishing from the reported depth-1 mean).
+SI_SDR_CAP_DB = 50.0
+
+
+def _clip_score(value: float) -> float | None:
+    """``None`` for nan (exclude); ``value`` clipped to +-SI_SDR_CAP_DB otherwise."""
+    if np.isnan(value):
+        return None
+    return float(np.clip(value, -SI_SDR_CAP_DB, SI_SDR_CAP_DB))
 
 
 def _device(preferred: str | None) -> str:
@@ -163,22 +182,46 @@ def _write_results(rows: list[dict], out_dir: Path, stem: str) -> None:
         writer.writerows(rows)
 
     depths = sorted({r["depth"] for r in rows})
-    lines = [f"# Phase 2 results -- {stem}", "", f"rows scored: {len(rows)}", ""]
+    lines = [
+        f"# Phase 2 results -- {stem}", "", f"rows scored: {len(rows)}", "",
+        f"(means clip +-inf to +-{SI_SDR_CAP_DB:.0f} dB rather than dropping them -- "
+        "see the diagnostic-counts table for how often that happens per system/depth)",
+        "",
+    ]
     header = "| system | " + " | ".join(f"depth {k}" for k in depths) + " |"
     sep = "|---" * (len(depths) + 1) + "|"
     lines += [header, sep]
     means: dict[str, dict[int, float]] = {}
+    diagnostics: dict[str, dict[int, dict[str, int]]] = {}
     for system_name in SYSTEMS:
         per_depth = {}
+        per_depth_diag = {}
         for k in depths:
-            scores = [
-                r["si_sdr"] for r in rows
-                if r["system"] == system_name and r["depth"] == k and np.isfinite(r["si_sdr"])
+            raw = [
+                r["si_sdr"] for r in rows if r["system"] == system_name and r["depth"] == k
             ]
-            per_depth[k] = float(np.mean(scores)) if scores else float("nan")
+            clipped = [c for c in (_clip_score(v) for v in raw) if c is not None]
+            per_depth[k] = float(np.mean(clipped)) if clipped else float("nan")
+            per_depth_diag[k] = {
+                "nan": sum(1 for v in raw if np.isnan(v)),
+                "perfect": sum(1 for v in raw if v == float("inf")),
+                "failed": sum(1 for v in raw if v == float("-inf")),
+                "scored": len(clipped),
+            }
         means[system_name] = per_depth
+        diagnostics[system_name] = per_depth_diag
         cells = " | ".join(f"{per_depth[k]:.2f}" for k in depths)
         lines.append(f"| {system_name} | {cells} |")
+
+    lines += [
+        "", "## Diagnostic counts (per system/depth: absent / perfect / failed / scored)",
+        "", "| system | depth | absent (nan) | perfect (+inf) | failed (-inf) | scored |",
+        "|---|---|---|---|---|---|",
+    ]
+    for system_name in SYSTEMS:
+        for k in depths:
+            d = diagnostics[system_name][k]
+            lines.append(f"| {system_name} | {k} | {d['nan']} | {d['perfect']} | {d['failed']} | {d['scored']} |")
 
     lines += ["", "## Ordering check (3+ speaker overlaps, deepest available depth)"]
     if depths:
@@ -245,6 +288,13 @@ def main() -> int:
 
     n_src = cfg["dataset"].get("n_src", 2)
     stem = f"phase2_{cfg['dataset']['name']}_{n_src}spk"
+    tag = cfg.get("eval", {}).get("tag")
+    if tag:
+        # Distinguishes runs against different checkpoints/configs (e.g. the
+        # original Phase 1 checkpoint vs. a scheduled-placement fine-tune) so
+        # a later run never silently overwrites an earlier one's results --
+        # the stem alone doesn't depend on which checkpoint was used.
+        stem = f"{stem}_{tag}"
     results_dir = Path(cfg.get("eval", {}).get("results_dir", "results"))
     _write_results(rows, results_dir, stem)
     return 0

@@ -19,6 +19,12 @@ Two independently-checkpointed systems, selected with ``--system``:
 Both trainings use frozen oracle diarization and (for ``proposed``) a frozen
 speaker encoder (CLAUDE.md §3: "Freeze pretrained weights first").
 
+``train.init_checkpoint`` (``proposed`` only, optional): warm-start from an
+existing checkpoint's weights instead of random init -- e.g. Phase 2 fine-tuning
+the Phase 1 checkpoint on ``dataset.placement: scheduled`` scenes so ``G`` gets
+real depth-3 overlap exposure. Must match the current run's ``extractor`` config
+(same architecture) or ``load_state_dict`` raises.
+
 Reproduce with::
 
     DAGGER_DATA_ROOT=/mnt/data python scripts/train_phase1.py \\
@@ -121,6 +127,16 @@ def train_proposed(cfg: dict, device: str) -> None:
     )
 
     model = build_tfgridnet_crossattn_module(cfg.get("extractor", {})).to(device)
+    init_checkpoint_path = cfg["train"].get("init_checkpoint")
+    if init_checkpoint_path:
+        # Fine-tune from an existing checkpoint (e.g. Phase 2's "adapt to real
+        # depth-3 overlap" run warm-starting from the Phase 1 checkpoint)
+        # instead of the default random init. Requires the SAME extractor
+        # architecture (cfg["extractor"]) the checkpoint was trained with --
+        # load_state_dict raises loudly on a shape mismatch otherwise.
+        state = torch.load(init_checkpoint_path, map_location=device)
+        model.load_state_dict(state["state_dict"])
+        print(f"[proposed] warm-started from {init_checkpoint_path}")
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"])
     grad_clip = cfg["train"].get("grad_clip", 5.0)
     checkpoint_every = cfg["train"].get("checkpoint_every", 5)
