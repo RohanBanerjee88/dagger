@@ -278,12 +278,11 @@ raw leakage instead of the margin; refinement with no gate accepting bad embeddi
 **Definition of done:** the depth-stratified plot clearly shows flat (ours) vs sloped (deflation),
 and ordering proposed ≥ gated > ungated on 3+ speakers.
 
-**Status (2026-07-22): code + unit tests landed, real-data run still pending.** All Phase 2
-components are implemented and unit-tested (synthetic fixtures only, no GPU/data needed;
-`pytest tests/phase2/` green, full suite 194 passed) but the actual depth-stratified DoD table/
-plot has NOT been generated yet — that needs the mounted LibriMix data + the existing Phase 1
-checkpoint, a follow-up run (same Kaggle-style workflow as Phase 1). System naming, to avoid
-confusion with Phase 1's "proposed" (= this phase's `no_recursion`):
+**Status (2026-07-22): code + unit tests landed.** All Phase 2 components are implemented and
+unit-tested (synthetic fixtures only, no GPU/data needed; `pytest tests/phase2/` green, full suite
+194 passed at the time). See the "First real run" note below for what happened once this ran
+against real data. System naming, to avoid confusion with Phase 1's "proposed" (= this phase's
+`no_recursion`):
 
 - `no_recursion` — exactly Phase 1's proposed path, unchanged.
 - `ungated_deflation` / `gated_deflation` — the deliberate residual anti-pattern (CLAUDE.md §1),
@@ -306,14 +305,52 @@ shorter clips end. Needed because the Phase 0/1 chain-staggered mixer cannot giv
 solo time and participation in a 3-way overlap in the same scene (see the Phase 1 "heads-up" note
 above). Works with existing Libri3Mix metadata — no new corpus/metadata needed.
 
-**Remaining before DoD can be marked done:** run `scripts/run_phase2.py --config
-configs/phase2_librimix_3spk_eval.yaml` against real Libri3Mix data + the Phase 1 checkpoint,
-inspect the depth-stratified table (`results/phase2_librimix_3spk_3spk.csv`/`.md`) and plot
-(`scripts/plot_phase2_depth.py`, needs the new `viz` extra), and confirm the ordering
-(`coarse_to_fine ≥ gated_deflation > ungated_deflation` at the deepest depth) and the flat-vs-
-sloped shape actually hold — gate thresholds in `configs/phase2_librimix_3spk_eval.yaml` (`tau_margin`,
-`max_mean_variance`, `min_vad_coverage`, `max_artifact_score`) are untuned defaults and will
-likely need adjustment once real numbers come back.
+**First real run (2026-07-26): ordering criterion met, flat-vs-sloped criterion only weakly
+met — DoD NOT yet called.** `scripts/run_phase2.py` against real Libri3Mix (150 scheduled-placement
+test scenes, oracle diarization) + the Phase 1 checkpoint (`checkpoints/phase1/proposed_librimix_3spk.pt`,
+untuned default gate thresholds), mean SI-SDR by depth:
+
+| system | depth 1 | depth 2 | depth 3 |
+|---|---|---|---|
+| no_recursion | 43.16 | 2.96 | -0.59 |
+| ungated_deflation | 39.60 | -1.28 | -6.05 |
+| gated_deflation | 40.90 | 0.12 | -3.96 |
+| coarse_to_fine | 43.17 | 2.35 | -1.33 |
+
+**Ordering holds cleanly:** `coarse_to_fine (-1.33) > gated_deflation (-3.96) > ungated_deflation
+(-6.05)` at depth 3, and the depth-2→3 *drop* increases monotonically in the theoretically-correct
+order too (no_recursion -3.55 dB, coarse_to_fine -3.68 dB, gated_deflation -4.09 dB,
+ungated_deflation -4.77 dB — accumulation-free systems degrade least, ungated deflation degrades
+most). **"Flat vs sloped" is only directionally supported, not the clean "clearly flat vs clearly
+sloped" plot CLAUDE.md's DoD language wants** — every system (including the two accumulation-free
+ones) drops sharply from depth 1 to depth 2, and keeps declining depth 2→3; the theoretically-
+predicted differences ride on top of that shared decline as a modest few-dB effect, not a
+dramatically different shape. Leading hypothesis: the Phase 1 checkpoint was trained under
+`dataset.placement: chain` (the default), which — per this same section's Phase 1 "heads-up" note —
+structurally produces very few genuine depth-3 overlaps, so `G` is comparatively out-of-distribution
+at depth 3 for *every* system, compressing everyone toward a shared floor and muting the visible
+gap between architectures even though the relative-degradation ordering still comes through.
+Not a data-leakage or diarization-alignment red flag (CLAUDE.md §5 red flags) — those would produce
+impossibly-good numbers, not a shared floor.
+
+**Bug found + fixed while reading the first results:** `_write_results` (and the plot script)
+originally filtered with `np.isfinite(si_sdr)`, which silently drops both `nan` (correct — speaker
+not active at that depth, nothing to score) *and* `±inf` (wrong — `si_sdr()` legitimately returns
+`+inf` for a perfect estimate / `-inf` for a silent one against real target energy; those are
+informative outcomes, not undefined ones). 44% of depth-1 rows were exactly `+inf` (solo
+copy-through, expected) and were vanishing from the reported depth-1 mean, understating it (32–40
+dB shown vs. 39.6–43.2 dB correct). Depth 2/3 — the comparison that actually matters for the DoD —
+had zero `±inf` rows and were unaffected. Fixed: both scripts now clip `±inf` to `±50 dB` before
+averaging instead of dropping it, and the `.md` output gained a diagnostic-counts table (absent /
+perfect / failed / scored, per system/depth) so this class of bug is visible directly in the report
+next time.
+
+**Next step:** most likely worth training (or continuing training) `G` with `dataset.placement:
+scheduled` (or a chain+scheduled mix) so it gets real depth-3 exposure, before re-running the
+depth-stratified eval — that should sharpen the flat-vs-sloped contrast if the compressed-floor
+hypothesis above is right. Gate thresholds in `configs/phase2_librimix_3spk_eval.yaml`
+(`tau_margin`, `max_mean_variance`, `min_vad_coverage`, `max_artifact_score`) are still untuned
+defaults and haven't been revisited given the above.
 
 ### ☐ Phase 3 — Real diarization + robustness
 
@@ -381,10 +418,14 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-22 — Phase 2 code + unit tests landed (scene scheduler, depth utility,
-gate module, deflation baselines, coarse-to-fine refinement, `si_sdr_by_depth`,
-`scripts/run_phase2.py`/`plot_phase2_depth.py`; full suite 194 passed). DoD NOT yet met — the
-real depth-stratified run against Libri3Mix + the Phase 1 checkpoint is the next step (see the
-Phase 2 status note above). Previously: 2026-07-13 — PHASE 1 DoD MET: proposed 4.40 dB vs blind
-2.05 dB overlap SI-SDR (3-spk Libri3Mix, oracle diarization, 150 test scenes) after scaled
-2000-scene batch runs; probe steering margin 12.8 dB.*
+*Last updated: 2026-07-26 — Phase 2 first real run: ordering criterion met
+(coarse_to_fine > gated_deflation > ungated_deflation at depth 3, and the depth-2→3 degradation
+ordered correctly too) but "flat vs sloped" only weakly/directionally supported, likely bottlenecked
+by the Phase 1 checkpoint never training on true depth-3 overlap (see the Phase 2 status note
+above) — DoD still NOT called. Also fixed a real aggregation bug found while reading the results
+(±inf silently dropped instead of clipped, understating depth-1). Previously: 2026-07-22 — Phase 2
+code + unit tests landed (scene scheduler, depth utility, gate module, deflation baselines,
+coarse-to-fine refinement, `si_sdr_by_depth`, `scripts/run_phase2.py`/`plot_phase2_depth.py`; full
+suite 194 passed). Before that: 2026-07-13 — PHASE 1 DoD MET: proposed 4.40 dB vs blind 2.05 dB
+overlap SI-SDR (3-spk Libri3Mix, oracle diarization, 150 test scenes) after scaled 2000-scene batch
+runs; probe steering margin 12.8 dB.*
