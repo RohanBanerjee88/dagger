@@ -352,6 +352,80 @@ hypothesis above is right. Gate thresholds in `configs/phase2_librimix_3spk_eval
 (`tau_margin`, `max_mean_variance`, `min_vad_coverage`, `max_artifact_score`) are still untuned
 defaults and haven't been revisited given the above.
 
+**Fine-tune attempt (2026-07-27): checkpoint recovered at epoch 25/30, not the full 30.**
+`scripts/train_phase1.py` gained an optional `train.init_checkpoint` key so a run can warm-start
+from an existing checkpoint's weights instead of random init; `configs/phase2_librimix_3spk_train_scheduled.yaml`
+fine-tunes `checkpoints/phase1/proposed_librimix_3spk.pt` on `dataset.placement: scheduled` scenes
+(same 2000-scene/30-epoch scale as the original Phase 1 run, for comparability) to give `G` real
+depth-3 exposure. First attempt on Kaggle hit the platform's ~12h (43200s) max execution ceiling
+and was SIGKILLed (exit 137) during epoch 30 -- the observed per-epoch cost (~1460s steady-state
++ ~580s one-time setup) put the full 30-epoch plan at ~44,400s, just over the cap. The mid-run
+checkpoint at epoch 25 (`checkpoint_every: 5`, overwriting) survived in the canceled version's
+output and was used as-is (loss -2.95 there vs. -3.28 at epoch 29, so not far off where it was
+headed) rather than re-running with a lower epoch count. Evaluated via
+`configs/phase2_librimix_3spk_eval_finetuned.yaml` (`eval.tag: finetuned`, writes
+`results/phase2_librimix_3spk_finetuned.{csv,md}` alongside the original
+`results/phase2_librimix_3spk.{csv,md}` for a before/after comparison) -- see the next status note
+for what this produced, once it's run.
+
+**Fine-tuned-checkpoint result (2026-07-29): ordering replicated on a second, independent
+checkpoint, but the fine-tune did NOT sharpen the accumulation-specific gap -- DoD still not
+called.** 150 scheduled-placement test scenes, same eval harness, checkpoint =
+`checkpoints/phase2/proposed_librimix_3spk_scheduled.pt` (epoch-25 fine-tune above). Confirmed
+deterministic: rerunning the identical config against the identical checkpoint reproduced the
+table to the decimal (no RNG anywhere in the eval path -- inference-mode extractor, no shuffling,
+deterministic scene placement/enrollment/deflation-order/gate).
+
+| system | depth 1 | depth 2 | depth 3 |
+|---|---|---|---|
+| no_recursion | 43.33 | 4.14 | 0.53 |
+| ungated_deflation | 41.72 | 0.49 | -3.92 |
+| gated_deflation | 42.19 | 1.84 | -2.19 |
+| coarse_to_fine | 43.36 | 4.21 | 0.21 |
+
+Absolute floor rose for every system at depth 2/3 (roughly +1 to +2 dB each, e.g. `no_recursion`
+depth 3: -0.59 -> +0.53) -- confirms half the hypothesis: `G` really was undertrained on true
+depth-3 overlap, and the scheduled-placement exposure helped. Ordering held again
+(`coarse_to_fine (0.21) > gated_deflation (-2.19) > ungated_deflation (-3.92)` at depth 3) --
+a second, independently fine-tuned checkpoint reproducing the same correctly-signed order is a
+real replication, not nothing.
+
+**But the accumulation-specific signal itself did not grow -- if anything it shrank for the worst
+offender.** Isolating the "extra drop beyond `no_recursion`'s own depth-2-to-3 drop" (the same
+technique used to read the first run, see above):
+
+| | extra drop -- BEFORE | extra drop -- AFTER (fine-tuned) |
+|---|---|---|
+| `coarse_to_fine` | 0.13 dB | 0.39 dB |
+| `gated_deflation` | 0.53 dB | 0.42 dB |
+| `ungated_deflation` | 1.22 dB | **0.80 dB** |
+
+Fine-tuning raised everyone's floor roughly equally rather than disproportionately helping the
+accumulation-free systems. Leading explanation: Theorem 3's deflation penalty is `L*||E_(m-1)||`
+-- fine-tuning likely shrank the intrinsic error `ε` (why absolute scores rose) but there's no
+reason it would also shrink the extractor's sensitivity `L` to a corrupted residual, and a more
+capable/responsive extractor could plausibly be *more* sensitive to corruption, roughly
+offsetting the `ε` improvement in the deflation-specific term. Also plausible this is partly
+150-scene run-to-run noise (~1 dB swings have been seen before in this pipeline, e.g. the blind
+baseline's training-seed variance). **Conclusion: retraining alone is not the lever that sharpens
+this experiment.** The still-open options from the "next step" note above (push to 4-5 speaker
+overlap depth, since Theorem 2's accumulation term grows faster than linearly and shouldn't
+depend on `ε`/`L` improving; and/or the min/max-band reporting TODO) are more promising than a
+further retrain.
+
+**Reporting TODO (not yet implemented): add empirical min/max (or a percentile band), not just the
+mean, to the depth-stratified table/plot.** Right now `_write_results` only reports the mean
+SI-SDR per system/depth, which hides the spread — a single mean can't distinguish "consistently
+mediocre" from "usually great with a few bad scenes." For a finite sample like ours, the
+infimum/supremum of the observed scores are just the min/max (no additional subtlety vs. the
+general infinite-set concept); in practice a 5th/95th percentile band is more robust to one
+freak-bad scene than the raw min. This is a cheap addition (re-aggregate the existing CSV, no new
+experiment) and should land in both `scripts/run_phase2.py`'s `_write_results` and
+`scripts/plot_phase2_depth.py`. Separately (bigger, not scheduled yet): Theorem 2's `‖E_m‖ ≤ mε`
+is a *proven* worst-case bound, not a measurement — a further validation step would be estimating
+`ε`/`L` empirically and checking our measured worst case actually falls under what that formula
+predicts; that fits Phase 4's full results section better than a Phase 2 bolt-on.
+
 ### ☐ Phase 3 — Real diarization + robustness
 
 **Goal:** survive imperfect, real diarization.
@@ -418,12 +492,15 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-26 — Phase 2 first real run: ordering criterion met
-(coarse_to_fine > gated_deflation > ungated_deflation at depth 3, and the depth-2→3 degradation
-ordered correctly too) but "flat vs sloped" only weakly/directionally supported, likely bottlenecked
-by the Phase 1 checkpoint never training on true depth-3 overlap (see the Phase 2 status note
-above) — DoD still NOT called. Also fixed a real aggregation bug found while reading the results
-(±inf silently dropped instead of clipped, understating depth-1). Previously: 2026-07-22 — Phase 2
+*Last updated: 2026-07-29 — Phase 2 fine-tuned-checkpoint result: ordering criterion replicated on
+a second, independently fine-tuned checkpoint (coarse_to_fine > gated_deflation > ungated_deflation
+at depth 3) and the absolute depth-2/3 floor rose ~1-2 dB for every system (confirms `G` was
+undertrained on true depth-3 overlap), but the accumulation-specific gap did NOT sharpen as hoped
+-- retraining alone is not the lever. DoD still NOT called; next candidates are pushing to 4-5
+speaker overlap depth or the min/max-band reporting TODO (see the Phase 2 status notes above).
+Previously: 2026-07-26 — Phase 2 first real run: ordering criterion met but "flat vs sloped" only
+weakly/directionally supported; also fixed a real aggregation bug found while reading the results
+(±inf silently dropped instead of clipped, understating depth-1). Before that: 2026-07-22 — Phase 2
 code + unit tests landed (scene scheduler, depth utility, gate module, deflation baselines,
 coarse-to-fine refinement, `si_sdr_by_depth`, `scripts/run_phase2.py`/`plot_phase2_depth.py`; full
 suite 194 passed). Before that: 2026-07-13 — PHASE 1 DoD MET: proposed 4.40 dB vs blind 2.05 dB
