@@ -115,8 +115,26 @@ python scripts/train_phase1.py --config configs/phase1_librimix_3spk_train.yaml 
 
 ### Pretrained weights
 
-Not yet hosted publicly. Training reproduces them via the commands above
-(~2000 scenes / 30 epochs, single T4 GPU). A hosted copy (Hugging Face Hub) is planned.
+Both checkpoints are hosted on the Hugging Face Hub under Apache-2.0 (same
+license as this repo). They do **not** bundle NVIDIA's TitaNet-Large speaker
+encoder (`nvidia/speakerverification_en_titanet_large`, CC-BY-4.0) — that
+model is loaded separately at runtime via NeMo; see `NOTICE` for the full
+attribution.
+
+| Checkpoint | HF repo | Used by |
+|---|---|---|
+| Phase 1 "proposed" extractor | [`AdityaAA2004/dagger-phase1-proposed-librimix-3spk`](https://huggingface.co/AdityaAA2004/dagger-phase1-proposed-librimix-3spk) | `configs/phase1_librimix_3spk_eval.yaml`, `configs/phase2_librimix_3spk_eval.yaml` |
+| Phase 2 fine-tuned extractor | [`AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned`](https://huggingface.co/AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned) | `configs/phase2_librimix_3spk_eval_finetuned.yaml` |
+
+Fetch and cache either checkpoint locally with:
+
+```python
+from huggingface_hub import hf_hub_download
+
+ckpt_path = hf_hub_download(
+    repo_id="AdityaAA2004/dagger-phase1-proposed-librimix-3spk",
+    filename="proposed_librimix_3spk.pt",
+)
 
 ## Limitations
 

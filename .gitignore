@@ -34,3 +34,5 @@ env/
 # of the target layout (CLAUDE.md §4) and must stay committable.
 /docs/*
 !/docs/theory.pdf
+
+checkpoints/
