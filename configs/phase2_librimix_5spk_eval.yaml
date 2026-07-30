@@ -6,8 +6,10 @@
 # SAME scheduled-placement fine-tuned checkpoint used by
 # phase2_librimix_3spk_eval_finetuned.yaml, on 5-speaker scenes synthesized by
 # scripts/extend_librimix_metadata.py from the existing Libri3Mix test CSV
-# (same LibriSpeech audio, no new corpus). Small limit -- this is a cheap
-# eval-only check, not a full run; raise it once the diagnostic looks sane.
+# (same LibriSpeech audio, no new corpus). limit: 150 matches the existing
+# 3-speaker eval scale -- raised from an initial 50-scene look (which already
+# showed the ordering holding at every depth) to check the depth-to-depth gap
+# trend isn't just 50-scene noise.
 #
 # Generate the metadata first (once, under DAGGER_DATA_ROOT):
 #   python scripts/extend_librimix_metadata.py \
@@ -24,7 +26,7 @@ dataset:
   n_src: 5
   placement: scheduled
   min_solo_ms: 1000.0
-  limit: 50
+  limit: 150
 
 enroll:
   k: 3
