@@ -1,0 +1,54 @@
+# Zero-shot depth-5 diagnostic (CLAUDE.md Phase 2 "next step"): does the
+# accumulation-specific gap between coarse_to_fine/gated_deflation/
+# ungated_deflation widen at deeper overlap, or does everyone collapse to a
+# shared floor the way the original chain-placement checkpoint did at depth 3
+# before scheduled-placement fine-tuning? No retraining -- this conditions the
+# SAME scheduled-placement fine-tuned checkpoint used by
+# phase2_librimix_3spk_eval_finetuned.yaml, on 5-speaker scenes synthesized by
+# scripts/extend_librimix_metadata.py from the existing Libri3Mix test CSV
+# (same LibriSpeech audio, no new corpus). Small limit -- this is a cheap
+# eval-only check, not a full run; raise it once the diagnostic looks sane.
+#
+# Generate the metadata first (once, under DAGGER_DATA_ROOT):
+#   python scripts/extend_librimix_metadata.py \
+#       --input metadata/Libri3Mix/libri3mix_test.csv \
+#       --output metadata/Libri3Mix/libri3mix_test_x5.csv \
+#       --target-n-src 5
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_x5.csv
+  n_src: 5
+  placement: scheduled
+  min_solo_ms: 1000.0
+  limit: 50
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_3spk_scheduled.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results
+  tag: zeroshot5   # writes results/phase2_librimix_5spk_zeroshot5.{csv,md}

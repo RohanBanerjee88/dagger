@@ -1,0 +1,48 @@
+# Same as phase2_librimix_5spk_eval.yaml but depth 4 -- a midpoint data point
+# between the existing depth-3 result and the depth-5 diagnostic, useful for
+# telling "gap widens gradually with depth" apart from "gap only appears at
+# the extreme." See phase2_librimix_5spk_eval.yaml for the full rationale.
+#
+# Generate the metadata first (once, under DAGGER_DATA_ROOT):
+#   python scripts/extend_librimix_metadata.py \
+#       --input metadata/Libri3Mix/libri3mix_test.csv \
+#       --output metadata/Libri3Mix/libri3mix_test_x4.csv \
+#       --target-n-src 4
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_x4.csv
+  n_src: 4
+  placement: scheduled
+  min_solo_ms: 1000.0
+  limit: 50
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_3spk_scheduled.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results
+  tag: zeroshot4   # writes results/phase2_librimix_4spk_zeroshot4.{csv,md}
