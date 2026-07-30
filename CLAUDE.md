@@ -461,6 +461,61 @@ rather than genuine monotonic widening. **Next: rerun both configs at `limit: 15
 both configs, matching the existing 3-speaker eval scale) to see whether the ordering and the
 widening trend survive a larger sample -- not yet run as of this update.
 
+**Depth-agnostic extractor investigation (2026-07-30): Stage 1 (waveform-level energy
+normalization) implemented and unit-tested; not yet run on real data.** The depth-4/5 zero-shot
+collapse above (-4 to -10 dB) affects `no_recursion` too, which has no gate/deflation logic at
+all -- ruling out the gate and pointing at the raw extractor `G`'s training exposure. Two research
+passes (a full codebase read of `dagger/extract/tfgridnet.py`/`crossattn.py`/`tfgridnet_crossattn.py`
+and `dagger/data/torch_adapter.py`/`mixing.py`, plus a literature search on TF-GridNet/USEF-TSE and
+the broader separation literature) converged on two findings: (a) `G` is architecturally
+speaker-count-agnostic already (no layer sized to a number of concurrent speakers) -- the failure
+is purely distributional; (b) there is no waveform-level energy normalization anywhere in the
+pipeline, so the raw mixture amplitude scales with however many concurrent sources happen to be
+summed, and every training scene so far summed at most 3 -- a 5-way overlap is a genuinely unseen
+amplitude/density regime for the LSTM/attention nonlinearities inside each TF-GridNet block (the
+per-block `GroupNorm` renormalizes *after* those nonlinearities run, not before, so it doesn't fully
+protect against this). Separately, TF-GridNet and USEF-TSE are both only ever trained/evaluated at
+a fixed speaker count in their own papers, and fixed-N-trained separators generalizing poorly to a
+different N is a known, established phenomenon in the broader field (e.g. Cone of Silence,
+arXiv:2010.06007) -- this repo's own pattern of one fine-tune per fixed depth reproduces exactly
+that setup. The literature's standard mitigation (recursive one-and-rest extraction from a residual)
+is explicitly incompatible with CLAUDE.md §1's central rule and is a non-starter here.
+
+Two-stage remedy planned (`/Users/adityaarchunananand/.claude/plans/ok-while-i-am-humble-rain.md`):
+**Stage 1** (this update) removes the amplitude confound; **Stage 2** (not started) trains `G` on a
+*mix* of depths in one run instead of one fixed depth per run, addressing the fixed-N-training root
+cause directly. Some intrinsic difficulty increase with depth is still expected regardless (more
+concurrent voices genuinely means more simultaneous spectral masking) -- "depth-agnostic" means
+much better zero-shot transfer, not identical absolute quality at every depth.
+
+Stage 1 landed: new `dagger/audio/normalize.py` (`active_rms` computed only over the *active*/nonzero
+region of a waveform, not the whole tensor -- training crops are short and overlap-centered while
+inference feeds whole scenes masked to just the overlap region, so a whole-tensor RMS would conflate
+"how much of this tensor is zero-padding" with "how many sources are summed"; `normalize`/`denormalize`
+built on it). Wired into `_TFGridNetCrossAttnModule.forward` (`dagger/extract/tfgridnet_crossattn.py`)
+only -- normalize on entry, run the backbone/fusion/mask computation unchanged, denormalize on exit.
+This is the single call site both training and inference already funnel through, so no other file
+needed changes. Verified by hand this gives an *exact* property (not just an improvement claim):
+`active_rms(k*x) = k*active_rms(x)` for `k>0`, so the network's internal computation is bit-identical
+regardless of input scale, meaning `module(k*x, e) == k*module(x, e)` exactly up to floating point --
+added as a mechanical unit test rather than a fuzzy check. Full suite green (202/202, no regressions);
+a synthetic 20-step training loop (forward/loss/backward/optimizer-step, alternating input amplitude
+>10x between steps to mimic the depth-3-vs-5 energy swing) stayed numerically stable throughout.
+Could not run the literal `configs/phase1_smoke.yaml` CPU check -- needs real LibriMix/LibriSpeech
+audio under `DAGGER_DATA_ROOT`, which only exists on Kaggle, not the local dev machine -- the
+synthetic loop is the closest available substitute and is arguably a harsher check.
+
+This change invalidates every existing checkpoint (the input distribution `input_conv`/GroupNorm/FiLM
+adapted to shifts). Per the plan, no dedicated GPU run was spent re-validating this in isolation --
+the already-queued `configs/phase2_librimix_5spk_train_pilot.yaml` (warm-started from
+`checkpoints/phase2/proposed_librimix_3spk_scheduled.pt`) is the vehicle for the first run against the
+new code. **Decision gate, not yet executed:** run that pilot, then eval it with
+`configs/phase2_librimix_4spk_eval_pilot.yaml` / `_5spk_eval_pilot.yaml` (150 test scenes each) and
+compare to the pre-Stage-1 zero-shot numbers logged above (-4 to -10 dB at depth 4-5). Narrowing means
+normalization was a real part of the confound; no change rules amplitude out and points squarely at
+Stage 2 (which is not started, and deliberately gated on this result so a later good-or-bad Stage 2
+outcome can be attributed to the right cause).
+
 ### ☐ Phase 3 — Real diarization + robustness
 
 **Goal:** survive imperfect, real diarization.
@@ -527,15 +582,27 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-30 — Phase 2 4-5 speaker overlap depth, first zero-shot look (50 scenes,
+*Last updated: 2026-07-30 — Depth-agnostic extractor investigation, Stage 1 landed: waveform-level
+energy normalization (`dagger/audio/normalize.py`, wired into
+`_TFGridNetCrossAttnModule.forward`) removes the confound where raw mixture amplitude scales with
+however many concurrent speakers are summed, and every training scene so far summed at most 3 -- a
+plausible contributor to the depth-4/5 zero-shot collapse below (which also affects `no_recursion`,
+ruling out the gate as the cause). Exact scale-equivariance verified by hand and by unit test; full
+suite green (202/202); a synthetic training-loop stability check passed. Not yet run against real
+data -- rides the already-queued depth-5 pilot fine-tune, whose zero-shot depth-4/5 re-eval against
+the numbers below is the actual decision gate, not yet executed. Stage 2 (train on a mix of depths
+in one run, rather than one fixed depth per run -- addressing the likely root cause per a literature
+search: TF-GridNet/USEF-TSE and fixed-N-trained separators generally are known to generalize poorly
+to a different N) is planned but not started, deliberately gated on Stage 1's result. Plan:
+`~/.claude/plans/ok-while-i-am-humble-rain.md`.
+Previously: 2026-07-30 — Phase 2 4-5 speaker overlap depth, first zero-shot look (50 scenes,
 no retraining): the coarse_to_fine > gated_deflation > ungated_deflation ordering now holds
 cleanly at every depth 2-5 (not just the deepest), and the gap trends wider (4.92/4.23/4.76/5.66 dB
 at depths 2/3/4/5) rather than staying flat/noise-level -- the first run where the
 accumulation-specific signal looks like it's actually growing with depth. Not yet conclusive: 50
 scenes is thin, and absolute SI-SDR at depth 4-5 is deeply negative for every system since the
 checkpoint was never fine-tuned past real depth-3 overlap (expected OOD, not a red flag). Both
-configs are already set to `limit: 150` for a rerun -- not yet executed. DoD still NOT called.
-Previously: 2026-07-29 — Phase 2 fine-tuned-checkpoint result: ordering criterion replicated on
+configs are already set to `limit: 150` for a rerun -- not yet executed. Before that: 2026-07-29 — Phase 2 fine-tuned-checkpoint result: ordering criterion replicated on
 a second, independently fine-tuned checkpoint (coarse_to_fine > gated_deflation > ungated_deflation
 at depth 3) and the absolute depth-2/3 floor rose ~1-2 dB for every system (confirms `G` was
 undertrained on true depth-3 overlap), but the accumulation-specific gap did NOT sharpen as hoped

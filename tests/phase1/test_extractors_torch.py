@@ -127,6 +127,22 @@ class TestTFGridNetCrossAttnModule:
             out_b = module(x, e_b)
         assert not torch.allclose(out_a, out_b)
 
+    def test_scale_equivariant_in_the_signal_input(self):
+        """Normalize-on-entry/denormalize-on-exit (dagger/audio/normalize.py)
+        should make module(k*x, e) == k*module(x, e) exactly for k > 0 -- the
+        network's internal computation runs on x/active_rms(x), which is
+        bit-identical regardless of k, so only the final rescale differs."""
+        torch.manual_seed(0)
+        module = build_tfgridnet_crossattn_module(self.CFG)
+        module.eval()
+        x = torch.randn(1, LENGTH)
+        e = torch.randn(1, 16)
+        with torch.no_grad():
+            out = module(x, e)
+            for k in (0.1, 10.0, 100.0):
+                out_scaled = module(k * x, e)
+                assert torch.allclose(out_scaled, k * out, atol=1e-4, rtol=1e-3)
+
 
 class TestTFGridNetCrossAttnExtractor:
     CFG = dict(

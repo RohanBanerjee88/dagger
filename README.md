@@ -17,7 +17,7 @@ s_hat_i(t) = x(t)·w_Ei(t) + G(x_O(t), e_bar_i)·w_Oi(t)
                                 ^^^^ always the ORIGINAL mixture
 ```
 
-## Status — Phase 0 (plumbing) + Phase 1 (identity conditioning) done
+## Status — Phase 0 + 1 done, Phase 2 in progress
 
 **Phase 0 — plumbing, oracle diarization:**
 
@@ -46,6 +46,18 @@ proposed extractor `G`: TF-GridNet + cross-attention fusion, an original
 implementation informed by the USEF-TSE architecture) are wired into
 reconstruction, alongside a blind-separation baseline for comparison. See
 [Results](#results) below.
+
+**Phase 2 — accumulation-free reconstruction (the money experiment):** in
+progress, DoD not yet called. `dagger/reconstruct/deflation.py` (the
+ungated/gated residual-deflation anti-patterns, built only for comparison —
+see CLAUDE.md §1), `dagger/refine/coarse_to_fine.py` (recursion refines the
+embedding only; audio always comes from the guarded, unmodified `x_O`), and
+`dagger/gate/` (confidence gate: identity margin, VAD, artifact score) are
+implemented and wired into a depth-stratified evaluation. **Ordering
+criterion met:** `coarse_to_fine > gated_deflation > ungated_deflation` on
+overlap depth 3, replicated on an independently fine-tuned checkpoint.
+**Flat-vs-sloped criterion only weakly/directionally supported so far** — see
+[Results](#results) and [Limitations](#limitations).
 
 ## Quickstart
 
@@ -113,6 +125,26 @@ python scripts/train_phase1.py --config configs/phase1_librimix_3spk_train.yaml 
 python scripts/train_phase1.py --config configs/phase1_librimix_3spk_train.yaml --system blind
 ```
 
+### Phase 2 — depth-stratified accumulation-free vs. deflation (3-speaker LibriMix, oracle diarization)
+
+Mean SI-SDR by overlap depth, fine-tuned checkpoint, 150 test scenes (5400 rows):
+
+| system | depth 1 | depth 2 | depth 3 |
+|---|---|---|---|
+| no_recursion | 43.33 dB | 4.14 dB | 0.53 dB |
+| ungated_deflation | 41.72 dB | 0.49 dB | -3.92 dB |
+| gated_deflation | 42.19 dB | 1.84 dB | -2.19 dB |
+| coarse_to_fine | 43.36 dB | 4.21 dB | 0.21 dB |
+
+`coarse_to_fine > gated_deflation > ungated_deflation` at depth 3, replicating the
+theoretically-predicted ordering (`results/phase2_librimix_3spk_finetuned.csv`). See
+[Limitations](#limitations) for why this isn't a called DoD yet. Reproduce:
+
+```bash
+pip install -e '.[data,ml]'
+python scripts/run_phase2.py --config configs/phase2_librimix_3spk_eval_finetuned.yaml
+```
+
 ### Pretrained weights
 
 Both checkpoints are hosted on the Hugging Face Hub under Apache-2.0 (same
@@ -135,6 +167,7 @@ ckpt_path = hf_hub_download(
     repo_id="AdityaAA2004/dagger-phase1-proposed-librimix-3spk",
     filename="proposed_librimix_3spk.pt",
 )
+```
 
 ## Limitations
 
@@ -152,6 +185,24 @@ ckpt_path = hf_hub_download(
   license currently available; Libri2Mix would substitute if needed.
 - **Real (non-oracle) diarization is untested.** All current results use ground-truth
   RTTM; Phase 3 swaps in a real diarizer and reports the oracle-vs-real gap.
+- **Phase 2's "flat vs. sloped" criterion is only directionally supported, not a clean
+  result.** The ordering `coarse_to_fine > gated_deflation > ungated_deflation` holds at
+  depth 3, and every system's depth-2→3 drop is larger the more deflation-prone the
+  system is (worst for `ungated_deflation`, best for `coarse_to_fine`) — but all four
+  systems still drop sharply from depth 1 to depth 2, so the accumulation-specific
+  effect rides on top of a shared decline rather than producing a dramatically
+  different shape between systems.
+- **Fine-tuning on scheduled-placement (true depth-3) scenes raised every system's
+  absolute floor by ~1-2 dB, but did not sharpen the accumulation-specific gap.** That
+  gap stayed roughly flat (`ungated_deflation`'s extra drop beyond `no_recursion`'s own
+  went from 1.22 dB to 0.80 dB) — retraining alone isn't the lever that makes this
+  effect larger; see `CLAUDE.md`'s Phase 2 section for the fuller analysis.
+- **The 4-5 speaker overlap-depth extension is zero-shot and out-of-distribution.**
+  The ordering holds cleanly at every depth 2-5 and the gap trends wider (a promising
+  sign the effect is real), but absolute SI-SDR at depth 4-5 is deeply negative for
+  every system, since the checkpoint was never trained past real depth-3 overlap —
+  read this as a relative/ordering result only. Only 50 scenes scored so far; a
+  150-scene rerun is planned but not yet executed.
 
 ## Where things are going
 

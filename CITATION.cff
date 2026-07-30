@@ -1,0 +1,28 @@
+# This CITATION.cff describes how to cite the dagger *software*.
+# Once the accompanying paper has an arXiv ID / JMLR entry, add a
+# `preferred-citation` block here for the paper itself (see the CFF spec:
+# https://github.com/citation-file-format/citation-file-format) rather than
+# editing this file's `authors`/`title` to describe the paper in place.
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "dagger: Diarization-guided, accumulation-free target speaker extraction"
+abstract: >-
+  Recovers one clean audio track per speaker from a single-channel recording
+  where people talk over each other, using speaker diarization to enroll each
+  speaker from their solo regions and an original TF-GridNet + cross-attention
+  extractor to pull each speaker directly out of the original overlap
+  mixture -- never from a subtracted residual -- so extraction error does not
+  accumulate with overlap depth.
+authors:
+  - given-names: Rohan
+    family-names: Banerjee
+    alias: RohanBanerjee88
+  - alias: AdityaAA2004
+    email: anandad1@msu.edu
+repository-code: "https://github.com/RohanBanerjee88/dagger"
+license: Apache-2.0
+version: 0.0.0
+keywords:
+  - speech separation
+  - target speaker extraction
+  - speaker diarization

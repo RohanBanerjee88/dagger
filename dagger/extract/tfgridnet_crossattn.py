@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from dagger.audio.normalize import denormalize, normalize
 from dagger.extract.base import Extractor
 from dagger.extract.crossattn import build_speaker_conditioned_cross_attention
 from dagger.extract.tfgridnet import build_backbone, match_length
@@ -61,14 +62,22 @@ def build_tfgridnet_crossattn_module(cfg: dict | None = None):
         def forward(self, x, embedding):
             import torch
 
+            # Normalize on entry so the network's internal computation always
+            # runs at one consistent scale regardless of how many concurrent
+            # speakers are summed into x -- see dagger/audio/normalize.py.
+            # Denormalizing the output by the same scale restores it to x's
+            # original absolute units before it leaves G, which every
+            # downstream consumer (the gate, the crossfade stitch) assumes.
+            x_norm, scale = normalize(x)
             h, spec, length = self.backbone(
-                x, embedding=embedding, fusion=self.fusion,
+                x_norm, embedding=embedding, fusion=self.fusion,
                 cross_attn_blocks=self.cross_attn_blocks,
             )
             mask = self.output_conv(h)
             mask_complex = torch.complex(mask[:, 0], mask[:, 1])
             out_spec = spec * mask_complex
-            return self.backbone.istft(out_spec, length)
+            out = self.backbone.istft(out_spec, length)
+            return denormalize(out, scale)
 
     return _TFGridNetCrossAttnModule()
 
