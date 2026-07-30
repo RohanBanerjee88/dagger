@@ -46,7 +46,7 @@ ever see code subtracting `ŝ` from `x_O` and feeding the result back into `G` f
 
 ## 2. Facts that are mathematically settled (do not "re-derive" and break them)
 
-These are proven in `docs/theory.pdf`. Treat them as ground truth.
+These are proven in `docs/diarization_full_mathematical_theory.pdf`. Treat them as ground truth.
 
 - **Solo regions are clean.** Where only speaker *i* is active, `x = s_i + n`. So a solo clip
   is a valid enrollment sample. ✔
@@ -110,7 +110,10 @@ dagger/
 ├── scripts/                  # run_phaseN.py entrypoints
 ├── tests/                    # unit tests, esp. the "no residual in audio path" guard
 └── docs/
-    └── theory.pdf            # the full proof doc — the why behind every module
+    ├── diarization_full_mathematical_theory.pdf   # the full proof doc (12 sections + master
+    │                                               # theorem) -- the why behind every module
+    └── diarization_corrected_proofs.pdf           # shorter errata companion: the same
+                                                    # monotone-growth correction, condensed
 ```
 
 ---
@@ -426,6 +429,38 @@ is a *proven* worst-case bound, not a measurement — a further validation step 
 `ε`/`L` empirically and checking our measured worst case actually falls under what that formula
 predicts; that fits Phase 4's full results section better than a Phase 2 bolt-on.
 
+**4-5 speaker overlap depth (2026-07-30): first zero-shot look, 50 scenes -- ordering holds at
+every depth, gap trends wider, 150-scene rerun pending.** Took the "push to 4-5 speaker overlap
+depth" option from the note above rather than another retrain: `scripts/extend_librimix_metadata.py`
+synthesizes 4/5-speaker LibriMix metadata by borrowing extra (speaker, utterance, gain) triples from
+other rows of the existing `libri3mix_test.csv` (same LibriSpeech audio already on disk, no new
+corpus, deterministic given `--seed`) -- nothing in `dagger/data/mixing.py`, `reconstruct/`, `gate/`,
+or `refine/` is capped at 3 speakers (all key off `activity.shape[0]`), so this is purely a metadata
+exercise. `configs/phase2_librimix_4spk_eval.yaml` / `_5spk_eval.yaml` run the SAME scheduled-
+placement fine-tuned checkpoint (`checkpoints/phase2/proposed_librimix_3spk_scheduled.pt`)
+zero-shot -- no retraining -- against these deeper scenes.
+
+First run (`limit: 50`, tags `zeroshot4`/`zeroshot5`) result, coarse_to_fine vs. ungated_deflation
+gap by depth:
+
+| depth | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| gap (dB) | 4.92 | 4.23 | 4.76 | 5.66 |
+
+The ordering `coarse_to_fine > gated_deflation > ungated_deflation` now holds cleanly at **every**
+depth 2 through 5 (previously only checked at the deepest available depth), and the gap trends
+wider rather than staying flat/noise-level -- the first run where the accumulation-specific signal
+looks like it's actually growing with depth, which is what the push to deeper overlap was for.
+Two caveats before calling this real: (a) absolute SI-SDR at depth 4-5 is deeply negative (-4 to
+-10 dB) for every system -- expected, not alarming, since this checkpoint was only ever fine-tuned
+on scenes reaching real depth-3 overlap, so depth 4-5 is genuinely out-of-distribution for it (same
+mechanism as the pre-scheduled-placement depth-3 shared-floor collapse, see the "first real run"
+note above); read this as a relative/ordering result, not an absolute-quality one; (b) 50 scenes is
+thin enough that the gap's wobble (4.92 -> 4.23 -> 4.76 -> 5.66) could partly be sampling noise
+rather than genuine monotonic widening. **Next: rerun both configs at `limit: 150`** (already set in
+both configs, matching the existing 3-speaker eval scale) to see whether the ordering and the
+widening trend survive a larger sample -- not yet run as of this update.
+
 ### ☐ Phase 3 — Real diarization + robustness
 
 **Goal:** survive imperfect, real diarization.
@@ -485,20 +520,26 @@ for the proposed system.
 
 ## 8. If you're unsure
 
-- **Why does a module exist?** → `docs/theory.pdf`, matched section numbers.
+- **Why does a module exist?** → `docs/diarization_full_mathematical_theory.pdf`, matched section numbers.
 - **Is this change safe?** → re-check §1 and §2. If it touches the audio path or the loss,
   be extra careful.
 - **Numbers look too good?** → suspect ground-truth leakage or metric-encoder reuse first.
 
 ---
 
-*Last updated: 2026-07-29 — Phase 2 fine-tuned-checkpoint result: ordering criterion replicated on
+*Last updated: 2026-07-30 — Phase 2 4-5 speaker overlap depth, first zero-shot look (50 scenes,
+no retraining): the coarse_to_fine > gated_deflation > ungated_deflation ordering now holds
+cleanly at every depth 2-5 (not just the deepest), and the gap trends wider (4.92/4.23/4.76/5.66 dB
+at depths 2/3/4/5) rather than staying flat/noise-level -- the first run where the
+accumulation-specific signal looks like it's actually growing with depth. Not yet conclusive: 50
+scenes is thin, and absolute SI-SDR at depth 4-5 is deeply negative for every system since the
+checkpoint was never fine-tuned past real depth-3 overlap (expected OOD, not a red flag). Both
+configs are already set to `limit: 150` for a rerun -- not yet executed. DoD still NOT called.
+Previously: 2026-07-29 — Phase 2 fine-tuned-checkpoint result: ordering criterion replicated on
 a second, independently fine-tuned checkpoint (coarse_to_fine > gated_deflation > ungated_deflation
 at depth 3) and the absolute depth-2/3 floor rose ~1-2 dB for every system (confirms `G` was
 undertrained on true depth-3 overlap), but the accumulation-specific gap did NOT sharpen as hoped
--- retraining alone is not the lever. DoD still NOT called; next candidates are pushing to 4-5
-speaker overlap depth or the min/max-band reporting TODO (see the Phase 2 status notes above).
-Previously: 2026-07-26 — Phase 2 first real run: ordering criterion met but "flat vs sloped" only
+-- retraining alone is not the lever. Before that: 2026-07-26 — Phase 2 first real run: ordering criterion met but "flat vs sloped" only
 weakly/directionally supported; also fixed a real aggregation bug found while reading the results
 (±inf silently dropped instead of clipped, understating depth-1). Before that: 2026-07-22 — Phase 2
 code + unit tests landed (scene scheduler, depth utility, gate module, deflation baselines,

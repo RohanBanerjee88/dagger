@@ -80,7 +80,8 @@ extractor `G`.
 
 The full phase-by-phase plan, the mathematically-settled facts, and the
 guardrails live in [`CLAUDE.md`](CLAUDE.md) — the single source of truth for this
-repo. The proof behind every module is in `docs/theory.pdf`.
+repo. The proof behind every module is in
+[`docs/diarization_full_mathematical_theory.pdf`](docs/diarization_full_mathematical_theory.pdf).
 
 ## License
 
