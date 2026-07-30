@@ -1,0 +1,47 @@
+# Same as phase2_librimix_4spk_eval.yaml but pointed at the depth-5 pilot
+# fine-tune's checkpoint (configs/phase2_librimix_5spk_train_pilot.yaml).
+# Deliberately reuses the depth-5-trained checkpoint rather than training a
+# separate depth-4 one: schedule_solo_then_overlap's overlap zone starts with
+# all 5 tails active together and decreases as shorter tails end, so n_src=5
+# training scenes already contain depth-4/3/2 samples during that taper --
+# one fine-tune should inform both eval configs. Writes
+# results/phase2_librimix_4spk_pilot5.{csv,md} alongside the zero-shot
+# results/phase2_librimix_4spk_zeroshot4.{csv,md} for a before/after comparison.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_x4.csv
+  n_src: 4
+  placement: scheduled
+  min_solo_ms: 1000.0
+  limit: 150
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_5spk_pilot.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results
+  tag: pilot5   # writes results/phase2_librimix_4spk_pilot5.{csv,md}

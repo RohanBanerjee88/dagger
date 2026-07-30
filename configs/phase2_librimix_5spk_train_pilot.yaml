@@ -1,0 +1,77 @@
+# Pilot fine-tune: does G's absolute floor at depth 4-5 move at all with real
+# training exposure, before committing to a full-scale run? The depth-4/5
+# zero-shot eval (CLAUDE.md Phase 2 status) showed deeply negative SI-SDR
+# (-4 to -10 dB) for every system -- expected, since the checkpoint being
+# evaluated was only ever fine-tuned on real depth-3 overlap, so 4-5 concurrent
+# voices are genuinely out-of-distribution for it. `no_recursion` (no
+# gate/deflation logic at all) is equally negative, which rules out the gate as
+# the cause and points at the raw extractor's training exposure instead.
+#
+# This is deliberately NOT sized like the original 2000-scene/30-epoch runs --
+# that scale already consumed the ~12h Kaggle batch ceiling once (SIGKILLed
+# mid-epoch-30 fine-tuning at n_src=3), and n_src=5 scheduled scenes are
+# structurally longer per scene (5x min_solo solo zone vs 3x, plus a longer
+# combined overlap tail), so per-epoch cost here is unmeasured and likely
+# higher than the n_src=3 baseline. 400 scenes / 15 epochs mirrors the ORIGINAL
+# Phase 1 diagnostic scale (before that scaled to 2000/30), sized purely to (a)
+# get a real per-epoch wall-clock measurement for n_src=5 on a T4, and (b) see
+# whether the training loss / eval floor moves in the right direction at all --
+# not to produce a converged checkpoint.
+#
+# Only one fine-tune is needed for both the depth-4 and depth-5 eval configs:
+# schedule_solo_then_overlap's overlap zone starts with all tails active
+# together (depth 5, if all 5 have tails) and DECREASES as shorter tails end
+# one by one, so n_src=5 training scenes already contain depth-4/3/2 samples
+# during that taper -- not just depth 5.
+#
+# Warm-starts from the existing depth-3-exposed checkpoint (further warm start,
+# not from scratch) -- same rationale as that checkpoint's own warm start from
+# the original Phase 1 checkpoint: real overlap-depth exposure the model has
+# never had, without discarding what it already learned.
+#
+# Generate the training metadata first (once, under DAGGER_DATA_ROOT):
+#   python scripts/extend_librimix_metadata.py \
+#       --input metadata/Libri3Mix/libri3mix_train-360.csv \
+#       --output metadata/Libri3Mix/libri3mix_train-360_x5.csv \
+#       --target-n-src 5
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_train-360_x5.csv
+  n_src: 5
+  placement: scheduled
+  min_solo_ms: 1000.0
+  limit: 400
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6   # MUST match checkpoints/phase2/proposed_librimix_3spk_scheduled.pt's
+                         # architecture exactly -- load_state_dict raises otherwise
+
+train:
+  system: proposed
+  epochs: 15              # pilot scale -- see the header note; raise once per-epoch cost is known
+  batch_size: 4
+  segment_seconds: 4.0
+  lr: 0.0003               # unchanged from the depth-3 fine-tune -- watch epoch-1 loss for a
+                           # spike/instability signature of this second warm start destabilizing
+                           # already-good weights; lower this (e.g. 1e-4) on a rerun if that shows up
+  grad_clip: 10.0
+  checkpoint_every: 5
+  init_checkpoint: checkpoints/phase2/proposed_librimix_3spk_scheduled.pt   # warm start again,
+                                                                             # not random init
+  checkpoint_out: checkpoints/phase2/proposed_librimix_5spk_pilot.pt   # NEW path -- never
+                                                                        # overwrites the depth-3
+                                                                        # checkpoint
