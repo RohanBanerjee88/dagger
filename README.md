@@ -204,13 +204,6 @@ ckpt_path = hf_hub_download(
   read this as a relative/ordering result only. Only 50 scenes scored so far; a
   150-scene rerun is planned but not yet executed.
 
-## Where things are going
-
-The full phase-by-phase plan, the mathematically-settled facts, and the
-guardrails live in [`CLAUDE.md`](CLAUDE.md) — the single source of truth for this
-repo. The proof behind every module is in
-[`docs/diarization_full_mathematical_theory.pdf`](docs/diarization_full_mathematical_theory.pdf).
-
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
