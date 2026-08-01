@@ -508,13 +508,71 @@ synthetic loop is the closest available substitute and is arguably a harsher che
 This change invalidates every existing checkpoint (the input distribution `input_conv`/GroupNorm/FiLM
 adapted to shifts). Per the plan, no dedicated GPU run was spent re-validating this in isolation --
 the already-queued `configs/phase2_librimix_5spk_train_pilot.yaml` (warm-started from
-`checkpoints/phase2/proposed_librimix_3spk_scheduled.pt`) is the vehicle for the first run against the
-new code. **Decision gate, not yet executed:** run that pilot, then eval it with
-`configs/phase2_librimix_4spk_eval_pilot.yaml` / `_5spk_eval_pilot.yaml` (150 test scenes each) and
-compare to the pre-Stage-1 zero-shot numbers logged above (-4 to -10 dB at depth 4-5). Narrowing means
-normalization was a real part of the confound; no change rules amplitude out and points squarely at
-Stage 2 (which is not started, and deliberately gated on this result so a later good-or-bad Stage 2
-outcome can be attributed to the right cause).
+`checkpoints/phase2/proposed_librimix_3spk_scheduled.pt`) was the vehicle for the first run against
+the new code.
+
+**Decision-gate result (2026-07-31): floor rose sharply at depth 4-5, but the gap narrowed, not
+widened -- reconfirms the 2026-07-29 finding via a different route, and points at Stage 2, not more
+single-depth fine-tuning.** Training ran clean (loss 4.80 -> 1.59 monotonically over 15 epochs; one
+gradient-norm spike to 4134 at epoch 13 was absorbed cleanly by `grad_clip: 10.0` with no loss
+disruption -- clipping working exactly as intended, not a sign to lower `lr`). Eval via
+`configs/phase2_librimix_4spk_eval_pilot.yaml` / `_5spk_eval_pilot.yaml` (150 test scenes each),
+compared against the pre-Stage-1 zero-shot numbers logged above:
+
+| system | depth 2 (old→new) | depth 3 (old→new) | depth 4 (old→new) | depth 5 (old→new) |
+|---|---|---|---|---|
+| no_recursion | 4.60→1.85 (-2.75) | -1.21→-2.45 (-1.24) | -5.19→-3.48 (+1.71) | -4.08→-4.80 (-0.72) |
+| ungated_deflation | -0.88→-1.32 (-0.44) | -5.68→-4.81 (+0.87) | -9.94→-5.08 (+4.86) | -10.22→-6.56 (+3.66) |
+| gated_deflation | 1.53→0.44 (-1.09) | -3.72→-3.36 (+0.36) | -8.41→-4.27 (+4.14) | -7.44→-5.55 (+1.89) |
+| coarse_to_fine | 4.04→1.43 (-2.61) | -1.45→-2.85 (-1.40) | -5.18→-4.04 (+1.14) | -4.56→-5.35 (-0.79) |
+
+Ordering (`coarse_to_fine > gated_deflation > ungated_deflation`) still holds cleanly at both depth 4
+and depth 5 (`ordering holds: True` printed both times) -- the core thesis is intact. But the
+accumulation-specific gap (coarse_to_fine minus ungated_deflation) shrank at every depth rather than
+widening: 4.92→2.75 (depth 2), 4.23→1.96 (depth 3), 4.76→1.30 (depth 4), 5.66→1.21 (depth 5).
+`ungated_deflation` improved the most because it started worst (most room to improve) -- exactly the
+"training raises everyone's floor, disproportionately helping whoever started worst, which narrows
+rather than sharpens the gap" pattern already logged on 2026-07-29, now reproduced via depth-5
+exposure + normalization together instead of more epochs at the same depth. New wrinkle this run
+surfaced: depth 2-3 quietly *regressed* for the non-deflation systems (no_recursion, coarse_to_fine)
+by 1-3 dB -- plausibly because `schedule_solo_then_overlap` scenes spend most of their overlap-zone
+time near peak depth before tapering, so this fine-tune's data skewed heavily toward deep overlap,
+specializing the network toward deep overlap at some cost to shallow-overlap quality it already had.
+
+Caveat: this run bundled two changes at once (normalization + new depth-5 training exposure), a
+deliberate simplification to avoid a throwaway GPU run -- so today's numbers credit "normalization +
+this training" together, not normalization in isolation. **Conclusion: a second single-depth
+fine-tune (even combined with normalization) keeps reproducing the same raise-the-floor/narrow-the-
+gap pattern regardless of exactly how the extra training is delivered.** Stage 2 (train on a genuine
+*mix* of depths in one run, not one more depth-specific fine-tune) is next.
+
+**Stage 2 (2026-07-31): multi-depth curriculum training implemented and unit-tested; not yet run on
+real data.** `scripts/train_phase1.py`'s `train_proposed` now accepts `dataset:` as either a single
+dict (unchanged behavior) or a *list* of per-depth dataset configs -- each entry builds its own
+loader via the existing, unmodified `build_dataset`/`build_scene_crop_dataset`; one shared model and
+optimizer see batches drawn from all loaders, interleaved in a per-epoch-shuffled order (fresh
+iterators + a shuffled draw-order list built from each loader's length, so every individual batch
+still comes from exactly one loader -- internally uniform in `num_speakers` -- meaning no custom
+collate/padding was needed anywhere). A single-entry list reduces to exactly the prior single-dataset
+code path, not a special case. Checkpoints now optionally record `trained_n_src` for provenance.
+Verified with two new tests (`tests/phase2/test_train_phase1_curriculum.py`, `build_dataset` and
+`TitaNetEncoder` faked so no real corpus/GPU is needed): a 2-depth (`n_src` 2 and 3) curriculum run
+trains without error and its saved checkpoint records both depths; a single-dict config still trains
+and records exactly one depth (the backward-compatibility check). Full suite green (204/204).
+
+`configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml` is the first real run to try: `dataset:`
+as a 3-entry list (n_src 3/4/5, `placement: scheduled`, ~130 scenes/depth, 15 epochs -- matching the
+existing single-depth pilot's total scene budget rather than multiplying it by 3, since this is an
+extrapolation from the n_src=3 timing anchor, not a measurement), warm-started from the depth-5 pilot
+checkpoint (already Stage-1-normalized and depth-5-exposed, so this run only has to add "a mix of
+depths" on top of that). Needs n_src=4 training-split metadata generated first (`n_src=5` was already
+generated for the depth-5 pilot but Kaggle sessions don't persist, so regenerate both if starting
+fresh) -- the command is in the config's header comment. Matching eval configs
+(`phase2_librimix_{3,4,5}spk_eval_curriculum.yaml`, tag `curriculum345`) are ready to compare against
+both the pre-Stage-1 zero-shot numbers and the single-depth pilot's numbers logged above. **Decision
+gate, not yet executed:** does training on a mix of depths widen the accumulation-specific gap (or at
+least stop narrowing it) while not regressing depths it wasn't the *primary* focus of, the way the
+single-depth pilot regressed depth 2-3 after specializing on depth 5?
 
 ### ☐ Phase 3 — Real diarization + robustness
 
@@ -582,20 +640,33 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-30 — Depth-agnostic extractor investigation, Stage 1 landed: waveform-level
-energy normalization (`dagger/audio/normalize.py`, wired into
-`_TFGridNetCrossAttnModule.forward`) removes the confound where raw mixture amplitude scales with
-however many concurrent speakers are summed, and every training scene so far summed at most 3 -- a
-plausible contributor to the depth-4/5 zero-shot collapse below (which also affects `no_recursion`,
-ruling out the gate as the cause). Exact scale-equivariance verified by hand and by unit test; full
-suite green (202/202); a synthetic training-loop stability check passed. Not yet run against real
-data -- rides the already-queued depth-5 pilot fine-tune, whose zero-shot depth-4/5 re-eval against
-the numbers below is the actual decision gate, not yet executed. Stage 2 (train on a mix of depths
-in one run, rather than one fixed depth per run -- addressing the likely root cause per a literature
-search: TF-GridNet/USEF-TSE and fixed-N-trained separators generally are known to generalize poorly
-to a different N) is planned but not started, deliberately gated on Stage 1's result. Plan:
-`~/.claude/plans/ok-while-i-am-humble-rain.md`.
-Previously: 2026-07-30 — Phase 2 4-5 speaker overlap depth, first zero-shot look (50 scenes,
+*Last updated: 2026-07-31 — Depth-agnostic extractor investigation, Stage 2 (multi-depth curriculum
+training) implemented and unit-tested; not yet run on real data. `scripts/train_phase1.py` now
+accepts `dataset:` as a list of per-depth configs -- one loader per depth, one shared model/optimizer,
+batches interleaved in a per-epoch-shuffled order across loaders (every individual batch still comes
+from exactly one loader, so no custom collate/padding was needed). A single-entry list reduces to the
+prior single-dataset behavior exactly. Two new tests (`build_dataset`/`TitaNetEncoder` faked, no real
+corpus/GPU needed) verify a 2-depth run trains and records both depths, and the single-dict backward-
+compat path is unaffected; full suite green (204/204).
+`configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml` (n_src 3/4/5, ~130 scenes/depth, 15
+epochs, warm-started from the depth-5 pilot checkpoint) plus matching eval configs
+(tag `curriculum345`) are ready but not yet run. Decision gate: does training on a mix of depths widen
+the accumulation-specific gap (or at least stop narrowing it) without regressing untargeted depths,
+unlike every single-depth fine-tune tried so far. Plan: `~/.claude/plans/ok-while-i-am-humble-rain.md`.
+Previously: 2026-07-31 — Stage 1 decision-gate result: the pilot fine-tune (normalization + depth-5
+exposure, warm-started from the depth-3 checkpoint) ran clean (loss 4.80→1.59 monotonically over 15
+epochs) and raised the depth 4-5 floor sharply for the deflation systems (+1.9 to +4.9 dB) and
+modestly for the accumulation-free systems at depth 4 only (depth 5 slightly regressed, -0.7 to
+-0.8 dB) -- but the accumulation-specific gap *narrowed* at every depth (e.g. 5.66→1.21 dB at depth 5)
+rather than widening, and depth 2-3 quietly regressed 1-3 dB for `no_recursion`/`coarse_to_fine`.
+Ordering still holds cleanly at every depth. This reproduces the exact "floor rises, gap narrows,
+doesn't sharpen" pattern already logged on 2026-07-29, now via a different route -- confirms
+single-depth fine-tuning is not the lever regardless of what else is bundled with it. Before that:
+2026-07-30 — Depth-agnostic extractor investigation, Stage 1 landed: waveform-level
+energy normalization (`dagger/audio/normalize.py`, wired into `_TFGridNetCrossAttnModule.forward`)
+removes the confound where raw mixture amplitude scales with however many concurrent speakers are
+summed. Exact scale-equivariance verified by hand and by unit test; full suite green (202/202); a
+synthetic training-loop stability check passed. Before that: 2026-07-30 — Phase 2 4-5 speaker overlap depth, first zero-shot look (50 scenes,
 no retraining): the coarse_to_fine > gated_deflation > ungated_deflation ordering now holds
 cleanly at every depth 2-5 (not just the deepest), and the gap trends wider (4.92/4.23/4.76/5.66 dB
 at depths 2/3/4/5) rather than staying flat/noise-level -- the first run where the

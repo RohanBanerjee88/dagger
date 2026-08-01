@@ -25,6 +25,18 @@ the Phase 1 checkpoint on ``dataset.placement: scheduled`` scenes so ``G`` gets
 real depth-3 overlap exposure. Must match the current run's ``extractor`` config
 (same architecture) or ``load_state_dict`` raises.
 
+``dataset`` (``proposed`` only) may be a single dataset config (as always) or a
+*list* of them -- e.g. one entry per overlap depth for curriculum training
+across a mix of depths in one run (CLAUDE.md Phase 2 "Stage 2": a single
+fixed-depth fine-tune keeps reproducing the same raise-the-floor/narrow-the-gap
+pattern regardless of which depth it targets). Each entry builds its own
+loader via the existing, unmodified :func:`~dagger.data.build_dataset` /
+:func:`~dagger.data.torch_adapter.build_scene_crop_dataset`; one shared model
+and optimizer see batches drawn from all loaders, interleaved in a shuffled
+order each epoch. A single-entry list (including a bare dict, treated as one)
+reduces to exactly the single-dataset behavior below -- this is one code path,
+not a special case.
+
 Reproduce with::
 
     DAGGER_DATA_ROOT=/mnt/data python scripts/train_phase1.py \\
@@ -55,15 +67,17 @@ def _device(preferred: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _save_checkpoint(model, model_config: dict, system: str, path: Path) -> None:
+def _save_checkpoint(
+    model, model_config: dict, system: str, path: Path, trained_n_src: list | None = None,
+) -> None:
     import torch
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {"state_dict": model.state_dict(), "model_config": model_config,
-         "phase": "1", "system": system},
-        path,
-    )
+    state = {"state_dict": model.state_dict(), "model_config": model_config,
+             "phase": "1", "system": system}
+    if trained_n_src is not None:
+        state["trained_n_src"] = trained_n_src
+    torch.save(state, path)
 
 
 def _grad_norm_summary(norms: list[float], clip: float | None) -> str:
@@ -105,6 +119,8 @@ def _checkpoint_path(cfg: dict, system: str) -> Path:
 
 
 def train_proposed(cfg: dict, device: str) -> None:
+    import random
+
     import torch
 
     from dagger.enroll.encoder import TitaNetEncoder
@@ -112,19 +128,28 @@ def train_proposed(cfg: dict, device: str) -> None:
     from dagger.losses.sisdr import si_sdr_loss
 
     fade = int(round(cfg.get("fade_ms", 0) / 1000.0 * int(cfg["sample_rate"])))
-    dataset = build_dataset(cfg)
+    datasets_cfg = cfg["dataset"] if isinstance(cfg["dataset"], list) else [cfg["dataset"]]
     encoder = TitaNetEncoder(device=device)
-    crops = build_scene_crop_dataset(
-        dataset,
-        segment_seconds=cfg["train"]["segment_seconds"],
-        encoder=encoder,
-        enroll_k=cfg.get("enroll", {}).get("k", 3),
-        fade=fade,
-        require_overlap=True,  # a no-overlap scene has nothing for G to learn from
-    )
-    loader = torch.utils.data.DataLoader(
-        crops, batch_size=cfg["train"]["batch_size"], shuffle=True
-    )
+
+    # One loader per dataset entry (e.g. one per overlap depth for curriculum
+    # training). A single-entry list -- the common case -- makes this loop
+    # build exactly one loader, identical to the pre-curriculum code path.
+    loaders: list[tuple[object, "torch.utils.data.DataLoader"]] = []
+    for dataset_cfg in datasets_cfg:
+        dataset = build_dataset({**cfg, "dataset": dataset_cfg})
+        crops = build_scene_crop_dataset(
+            dataset,
+            segment_seconds=cfg["train"]["segment_seconds"],
+            encoder=encoder,
+            enroll_k=cfg.get("enroll", {}).get("k", 3),
+            fade=fade,
+            require_overlap=True,  # a no-overlap scene has nothing for G to learn from
+        )
+        loader = torch.utils.data.DataLoader(
+            crops, batch_size=cfg["train"]["batch_size"], shuffle=True
+        )
+        loaders.append((dataset_cfg.get("n_src"), loader))
+        print(f"[proposed] built loader for n_src={dataset_cfg.get('n_src')}: {len(crops)} scenes")
 
     model = build_tfgridnet_crossattn_module(cfg.get("extractor", {})).to(device)
     init_checkpoint_path = cfg["train"].get("init_checkpoint")
@@ -141,12 +166,26 @@ def train_proposed(cfg: dict, device: str) -> None:
     grad_clip = cfg["train"].get("grad_clip", 5.0)
     checkpoint_every = cfg["train"].get("checkpoint_every", 5)
     checkpoint_out = _checkpoint_path(cfg, "proposed")
+    trained_n_src = [n_src for n_src, _ in loaders]
 
     for epoch in range(cfg["train"]["epochs"]):
         total_loss = 0.0
         n_batches = 0
         grad_norms: list[float] = []
-        for batch in loader:
+
+        # Fresh iterators each epoch (re-triggers each DataLoader's own
+        # shuffle=True reshuffle). Batches are drawn in a per-epoch-shuffled
+        # order interleaved ACROSS loaders, so one epoch mixes depths -- but
+        # every individual batch still comes from exactly one loader (so it's
+        # internally uniform in num_speakers), which is why no custom
+        # collate/padding is needed anywhere. With one loader this reduces to
+        # draining it in its own shuffled order, identical to before.
+        iters = [iter(loader) for _, loader in loaders]
+        draw_order = [idx for idx, (_, loader) in enumerate(loaders) for _ in range(len(loader))]
+        random.shuffle(draw_order)
+
+        for idx in draw_order:
+            batch = next(iters[idx])
             mixture = batch["mixture"].to(device)
             overlap = batch["overlap"].to(device)
             sources = batch["sources"].to(device)
@@ -210,10 +249,10 @@ def train_proposed(cfg: dict, device: str) -> None:
         # Periodic (overwriting) save so an interrupted long run keeps its
         # latest state instead of losing everything to the end-only save.
         if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
-            _save_checkpoint(model, cfg.get("extractor", {}), "proposed", checkpoint_out)
+            _save_checkpoint(model, cfg.get("extractor", {}), "proposed", checkpoint_out, trained_n_src)
             print(f"[proposed] checkpoint saved @ epoch {epoch + 1} -> {checkpoint_out}")
 
-    _save_checkpoint(model, cfg.get("extractor", {}), "proposed", checkpoint_out)
+    _save_checkpoint(model, cfg.get("extractor", {}), "proposed", checkpoint_out, trained_n_src)
     print(f"saved checkpoint to {checkpoint_out}")
 
 

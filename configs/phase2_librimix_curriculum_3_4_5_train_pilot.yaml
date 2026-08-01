@@ -1,0 +1,93 @@
+# Stage 2 pilot: train G on a MIX of overlap depths (n_src 3, 4, 5) in ONE run,
+# instead of one more depth-specific fine-tune. Motivation (CLAUDE.md Phase 2
+# "Depth-agnostic extractor investigation"): the Stage 1 decision-gate result
+# (2026-07-31) showed a single-depth fine-tune -- even combined with the Stage 1
+# normalization change -- reproduces the same pattern every single-depth
+# fine-tune has shown so far: it raises the absolute floor at the trained depth,
+# but NARROWS the accumulation-specific gap (rather than widening it) because
+# whichever system started worst improves the most, and it quietly regresses
+# depths it wasn't trained on this round (2-3 dropped 1-3 dB after the depth-5
+# pilot). Training on several depths at once is the untried lever.
+#
+# Mechanism (scripts/train_phase1.py): `dataset:` is a LIST of per-depth
+# entries. Each builds its own loader via the existing, unmodified
+# build_dataset/build_scene_crop_dataset; ONE shared model+optimizer sees
+# batches drawn from all three loaders, interleaved in a shuffled order each
+# epoch. Every individual batch still comes from exactly one loader (uniform
+# num_speakers within it), so no custom collate/padding is needed.
+#
+# Budget (CLAUDE.md's plan doc): ~130 scenes per depth (390 total -- matching
+# the existing 400-scene single-depth pilot's total budget rather than
+# multiplying it by 3), 15 epochs. This is an EXTRAPOLATION from the n_src=3
+# timing anchor (~1460s/epoch @ 2000 scenes), not a measurement -- n_src=4/5
+# scenes are structurally longer per scene. Measure the actual first-epoch
+# wall-clock time before trusting this budget for a bigger follow-up run.
+#
+# Warm-started from the depth-5 pilot checkpoint (already Stage-1-normalized
+# and depth-5-exposed) rather than the depth-3 checkpoint, so this run only has
+# to add "a mix of depths" on top of an already-normalized starting point.
+#
+# Generate the n_src=4 training metadata first (n_src=3 already exists as the
+# official CSV; n_src=5 was generated for the depth-5 pilot -- regenerate both
+# if this is a fresh Kaggle session, since sessions don't persist):
+#   python scripts/extend_librimix_metadata.py \
+#       --input metadata/Libri3Mix/libri3mix_train-360.csv \
+#       --output metadata/Libri3Mix/libri3mix_train-360_x4.csv \
+#       --target-n-src 4
+#   python scripts/extend_librimix_metadata.py \
+#       --input metadata/Libri3Mix/libri3mix_train-360.csv \
+#       --output metadata/Libri3Mix/libri3mix_train-360_x5.csv \
+#       --target-n-src 5
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360.csv
+    n_src: 3
+    placement: scheduled
+    min_solo_ms: 1000.0
+    limit: 130
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360_x4.csv
+    n_src: 4
+    placement: scheduled
+    min_solo_ms: 1000.0
+    limit: 130
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360_x5.csv
+    n_src: 5
+    placement: scheduled
+    min_solo_ms: 1000.0
+    limit: 130
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6   # MUST match checkpoints/phase2/proposed_librimix_5spk_pilot.pt's
+                         # architecture exactly -- load_state_dict raises otherwise
+
+train:
+  system: proposed
+  epochs: 15              # pilot scale -- measure epoch-1 wall-clock before trusting this
+  batch_size: 4
+  segment_seconds: 4.0
+  lr: 0.0003               # unchanged from prior fine-tunes -- watch epoch-1 loss/grad_norm
+                           # for a spike; this is a third warm start in a row
+  grad_clip: 10.0
+  checkpoint_every: 5
+  init_checkpoint: checkpoints/phase2/proposed_librimix_5spk_pilot.pt   # warm start from the
+                                                                         # Stage-1-normalized,
+                                                                         # depth-5-exposed checkpoint
+  checkpoint_out: checkpoints/phase2/proposed_librimix_curriculum_3_4_5.pt   # NEW path -- never
+                                                                              # overwrites prior
+                                                                              # checkpoints
