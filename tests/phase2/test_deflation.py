@@ -84,7 +84,7 @@ class TestReconstructAllDeflationAccumulatesWithoutAGate:
     def test_ungated_second_speaker_extracts_from_a_residual(self):
         x, x_O, activity, solo, embeddings = self._scene()
         extractor = _AddEmbeddingExtractor()
-        outputs, gate_results = reconstruct_all_deflation(
+        outputs, gate_results, accepted_sequence = reconstruct_all_deflation(
             x, x_O, activity, solo, embeddings, extractor, order=[0, 1], gate_fn=None
         )
         assert gate_results == [None, None]
@@ -113,7 +113,7 @@ class TestReconstructAllDeflationAccumulatesWithoutAGate:
         def reject_everything(speaker_idx, estimate):
             return GateResult(False, float("nan"), float("nan"), float("nan"), "rejected")
 
-        outputs, gate_results = reconstruct_all_deflation(
+        outputs, gate_results, accepted_sequence = reconstruct_all_deflation(
             x, x_O, activity, solo, embeddings, extractor, order=[0, 1], gate_fn=reject_everything
         )
         assert all(r is not None and r.accepted is False for r in gate_results)
@@ -133,10 +133,10 @@ class TestReconstructAllDeflationAccumulatesWithoutAGate:
         def accept_everything(speaker_idx, estimate):
             return GateResult(True, 1.0, 1.0, 0.0, "accepted")
 
-        ungated_outputs, _ = reconstruct_all_deflation(
+        ungated_outputs, _, _ = reconstruct_all_deflation(
             x, x_O, activity, solo, embeddings, extractor, order=[0, 1], gate_fn=None
         )
-        gated_outputs, gate_results = reconstruct_all_deflation(
+        gated_outputs, gate_results, accepted_sequence = reconstruct_all_deflation(
             x, x_O, activity, solo, embeddings, extractor, order=[0, 1], gate_fn=accept_everything
         )
         assert all(r is not None and r.accepted for r in gate_results)

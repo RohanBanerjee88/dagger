@@ -106,7 +106,8 @@ class TestRefineEmbeddingsAcceptReject:
             raw = fake_encoder.embed(clip, SAMPLE_RATE)
             expected = 0.5 * embeddings[i] + 0.5 * raw
             np.testing.assert_allclose(final_embeddings[i], expected)
-            assert round_results[i].accepted is True
+            assert round_results[0][i].accepted is True
+        assert len(round_results) == 1  # one entry per round, not just the last
 
     def test_rejected_update_leaves_embedding_unchanged(self, monkeypatch, fake_encoder):
         x, x_O, activity, solo = _scene()
@@ -124,7 +125,14 @@ class TestRefineEmbeddingsAcceptReject:
         )
 
         np.testing.assert_allclose(final_embeddings, embeddings)
-        assert all(r is not None and r.accepted is False for r in round_results)
+        # Every round is kept, not just the last, so a caller can tell a gate
+        # that rejected from round 0 apart from one that only rejected later.
+        assert len(round_results) == 2
+        assert all(
+            r is not None and r.accepted is False
+            for per_speaker in round_results
+            for r in per_speaker
+        )
 
 
 class TestAudioAlwaysComesFromXOAcrossRounds:

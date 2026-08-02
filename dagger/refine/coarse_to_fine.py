@@ -62,7 +62,7 @@ def refine_embeddings(
     max_mean_variance: float,
     min_vad_coverage: float,
     max_artifact_score: float,
-) -> tuple[np.ndarray, list[GateResult | None]]:
+) -> tuple[np.ndarray, list[list[GateResult | None]]]:
     """Refine each speaker's embedding over ``rounds`` iterations.
 
     Each round: reconstruct every speaker with the current embeddings (via the
@@ -76,19 +76,23 @@ def refine_embeddings(
     rejected candidate leaves that speaker's embedding unchanged for the next
     round.
 
-    Returns ``(final_embeddings, last_round_gate_results)`` -- the caller (e.g.
+    Returns ``(final_embeddings, round_results)`` -- the caller (e.g.
     ``scripts/run_phase2.py``) makes one final ``reconstruct_all`` call with
     ``final_embeddings`` to get the actual output audio; this function never
-    produces audio itself.
+    produces audio itself. ``round_results[r][i]`` is speaker ``i``'s gate
+    decision in round ``r`` (every round is kept, not just the last, so a
+    caller can tell "the gate rubber-stamped everything from round 0" apart
+    from "refinement degraded progressively"), or ``None`` when that speaker
+    had no overlap-only region to re-embed from that round.
     """
     num_speakers = activity.shape[0]
     embeddings = np.array(initial_embeddings, dtype=np.float64, copy=True)
-    round_results: list[GateResult | None] = [None] * num_speakers
+    round_results: list[list[GateResult | None]] = []
 
     for _round in range(rounds):
         outputs = reconstruct_all(x, x_O, activity, solo, embeddings, extractor, fade=fade)
         candidate_embeddings = embeddings.copy()
-        round_results = [None] * num_speakers
+        round_results.append([None] * num_speakers)
 
         for i in range(num_speakers):
             overlap_i = (activity[i] > 0) & (solo[i] <= 0)
@@ -119,7 +123,7 @@ def refine_embeddings(
                 # confidence_gate's margin check for the same clip.
                 precomputed_embedding=raw_embedding,
             )
-            round_results[i] = result
+            round_results[-1][i] = result
             if result.accepted:
                 candidate_embeddings[i] = blended
 

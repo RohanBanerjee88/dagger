@@ -51,7 +51,7 @@ def reconstruct_all_deflation(
     *,
     gate_fn: Optional[Callable[[int, np.ndarray], GateResult]] = None,
     fade: int = 0,
-) -> tuple[np.ndarray, list[Optional[GateResult]]]:
+) -> tuple[np.ndarray, list[Optional[GateResult]], np.ndarray]:
     """Iterative residual-deflation reconstruction, for comparison only.
 
     Speakers are processed in ``order`` (the caller's choice -- e.g. ascending
@@ -68,13 +68,21 @@ def reconstruct_all_deflation(
       leaves the running residual untouched for the next speaker (so it can't
       contaminate anyone else's extraction).
 
-    Returns ``(outputs [S, T], gate_results)``; ``gate_results[i]`` is ``None``
-    when ``gate_fn`` is ``None``, else that speaker's :class:`GateResult`.
+    Returns ``(outputs [S, T], gate_results, accept_sequence)``.
+    ``gate_results[i]`` is ``None`` when ``gate_fn`` is ``None``, else that
+    speaker's :class:`GateResult`. ``accept_sequence`` is a ``[S]`` bool array
+    recording whether each speaker's estimate was subtracted into the running
+    residual -- all ``True`` when ungated. It is indexed by SPEAKER, not by
+    position in ``order``, so a caller counting how much accumulated error
+    speaker ``i`` inherited must walk ``order`` itself:
+    ``sum(accept_sequence[j] for j in order[:order.index(i)])``.
     """
     num_speakers = activity.shape[0]
     outputs = np.zeros_like(activity, dtype=np.float64)
     gate_results: list[Optional[GateResult]] = [None] * num_speakers
-
+    # Speaker-indexed (NOT order-indexed) -- see the docstring's note on how a
+    # caller turns this into "how many accepted estimates preceded speaker i".
+    accept_sequence = np.zeros(num_speakers, dtype=bool)
     x_samples = np.asarray(x, dtype=np.float64)
     running_residual = x_O
     for i in order:
@@ -87,6 +95,7 @@ def reconstruct_all_deflation(
             result = gate_fn(i, outputs[i])
             gate_results[i] = result
             accept = result.accepted
+        accept_sequence[i] = accept
 
         if accept:
             overlap_contribution = TrackedSignal(
@@ -96,4 +105,4 @@ def reconstruct_all_deflation(
             )
             running_residual = running_residual - overlap_contribution
 
-    return outputs, gate_results
+    return outputs, gate_results, accept_sequence
