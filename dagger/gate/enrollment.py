@@ -13,6 +13,18 @@ from __future__ import annotations
 import numpy as np
 
 
+def mean_enrollment_variance(variance: np.ndarray) -> float:
+    """``V_i`` reduced to the single number the threshold is compared against.
+
+    Split out from :func:`enrollment_variance_ok` so the measured value can be
+    recorded (and later swept over) without re-deriving the reduction --
+    ``dagger.gate.confidence.gate_diagnostics`` reports this, and
+    ``apply_thresholds`` compares it, so the two can never disagree about what
+    "the enrollment variance" means.
+    """
+    return float(np.mean(np.asarray(variance, dtype=np.float64)))
+
+
 def enrollment_variance_ok(variance: np.ndarray, max_mean_variance: float) -> bool:
     """``True`` iff the enrollment's mean per-dimension variance is within bounds.
 
@@ -22,4 +34,4 @@ def enrollment_variance_ok(variance: np.ndarray, max_mean_variance: float) -> bo
     wasn't actually solo -- so the margin gate downstream should not be trusted
     for this speaker until enrollment is fixed (or the speaker is dropped).
     """
-    return float(np.mean(np.asarray(variance, dtype=np.float64))) <= max_mean_variance
+    return mean_enrollment_variance(variance) <= max_mean_variance

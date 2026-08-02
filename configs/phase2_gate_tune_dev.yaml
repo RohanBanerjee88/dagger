@@ -1,0 +1,86 @@
+# Confidence-gate threshold selection, on a DEV split (CLAUDE.md Phase 2).
+#
+# Run with scripts/tune_gate.py, not run_phase2.py. It measures the four gate
+# diagnostics on scenes the checkpoint never trained on, builds two labelled
+# populations (honest vs. deliberately contaminated enrollment; correctly
+# conditioned vs. deliberately swapped extraction), and sweeps each threshold
+# against what it is supposed to detect.
+#
+# Why a dev split at all: selecting thresholds on the 150 test scenes and then
+# reporting results on those same scenes is leakage (CLAUDE.md §8). The
+# curriculum training runs used `limit: 650` on these same train-360 CSVs, i.e.
+# rows [0, 650), so `offset: 650` below is provably disjoint from BOTH training
+# and the (separate) test CSVs.
+#
+# Why NOT tune against SI-SDR: gated_deflation interpolates between
+# ungated_deflation (accept everything) and no_recursion (reject everything --
+# the residual never updates, so every speaker extracts from a pristine x_O).
+# Maximizing its SI-SDR just slides a comparison baseline toward the system it
+# is meant to lose to, and tightening far enough inverts the ordering claim for
+# reasons unrelated to the theory. Each threshold is tuned against its own
+# intrinsic criterion instead, then frozen and applied unchanged everywhere.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/tune_gate.py \
+#       --config configs/phase2_gate_tune_dev.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+# A list, so the sweep sees every overlap depth the curriculum checkpoint was
+# trained on rather than specializing the thresholds to one speaker count.
+dataset:
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360.csv
+    n_src: 3
+    placement: scheduled
+    min_solo_ms: 1000.0
+    offset: 650      # rows [0, 650) were the curriculum training slice
+    limit: 50
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360_x4.csv
+    n_src: 4
+    placement: scheduled
+    min_solo_ms: 1000.0
+    offset: 650
+    limit: 50
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360_x5.csv
+    n_src: 5
+    placement: scheduled
+    min_solo_ms: 1000.0
+    offset: 650
+    limit: 50
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_full.pt
+
+# Starting point only -- these are the untuned defaults every Phase 2 run has
+# used so far. tune_gate.py reports what each of them currently accepts/rejects
+# on dev, then recommends replacements; it does not read them as constraints.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+tune:
+  results_dir: results
+  tag: curriculum345full   # writes results/gate_tune_curriculum345full.{csv,md}
+  # Candidate values per threshold. Swept INDEPENDENTLY, not as a joint grid:
+  # a joint sweep needs a single objective, the only available one is SI-SDR,
+  # and optimizing that is the trap described in the header.
+  tau_margin_grid: [-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.15, 0.2, 0.3]
+  max_mean_variance_grid: [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
+  min_vad_coverage_grid: [0.0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]
+  max_artifact_score_grid: [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]

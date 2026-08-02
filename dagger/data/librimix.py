@@ -16,6 +16,9 @@ Config block (``cfg["dataset"]``):
     n_src: 2                # 2 or 3
     overlap: 0.5            # staggered-overlap fraction (mixing.stagger_offsets)
     limit: 8               # cap the number of scenes (a handful for Phase 0)
+    offset: 0               # skip this many metadata rows before `limit`; the
+                             # pair carves disjoint splits out of one CSV (a run
+                             # with limit N and one with offset N share no scenes)
     placement: chain        # "chain" (default, Phase 0/1) or "scheduled" (Phase 2:
                              # guaranteed per-speaker solo + a synchronized deep-
                              # overlap zone -- see mixing.schedule_solo_then_overlap)
@@ -85,6 +88,15 @@ class LibriMixDataset(SceneDataset):
         if self.placement not in ("chain", "scheduled"):
             raise ValueError(f"placement must be 'chain' or 'scheduled', got {self.placement!r}.")
         self.limit = cfg.get("limit")
+        # Skip this many rows before applying `limit`. Defaults to 0, so every
+        # existing config keeps its exact scene list. Its purpose is a dev split
+        # provably disjoint from training: a run that trained on `limit: 650`
+        # used rows [0, 650), so `offset: 650` cannot overlap it -- needed
+        # because tuning thresholds on the test scenes and then reporting on
+        # those same scenes is leakage (CLAUDE.md §8).
+        self.offset = int(cfg.get("offset", 0))
+        if self.offset < 0:
+            raise ValueError(f"offset must be >= 0, got {self.offset}.")
         self.data_root = resolve_data_root()
         self.metadata = self.data_root / str(cfg["metadata"])
         if not self.metadata.is_file():
@@ -96,6 +108,7 @@ class LibriMixDataset(SceneDataset):
     def _read_rows(self) -> list[dict]:
         with open(self.metadata, newline="", encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
+        rows = rows[self.offset:]
         if self.limit is not None:
             rows = rows[: int(self.limit)]
         return rows

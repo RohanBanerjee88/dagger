@@ -90,7 +90,7 @@ SCORE_FIELDS = [
 # factor. Keeping the two grains in separate files makes that mistake hard.
 GATE_FIELDS = [
     "scene", "speaker", "system", "round",
-    "accepted", "margin", "vad_coverage", "artifact_score", "reason",
+    "accepted", "mean_variance", "margin", "vad_coverage", "artifact_score", "reason",
 ]
 
 # si_sdr() legitimately returns +-inf (a perfect estimate / a silent estimate
@@ -261,9 +261,9 @@ def score_scene(
         if result is not None:
             gate_rows.append({
                 "scene": scene.name, "speaker": spk, "system": "gated_deflation", "round": 0,
-                "accepted": result.accepted, "margin": result.margin,
-                "vad_coverage": result.vad_coverage, "artifact_score": result.artifact_score,
-                "reason": result.reason,
+                "accepted": result.accepted, "mean_variance": result.mean_variance,
+                "margin": result.margin, "vad_coverage": result.vad_coverage,
+                "artifact_score": result.artifact_score, "reason": result.reason,
             })
     for round_index, per_speaker in enumerate(round_results):
         for i, spk in enumerate(speakers):
@@ -278,13 +278,14 @@ def score_scene(
                 # be silently indistinguishable from a rejection when accept
                 # rates are counted.
                 row.update({
-                    "accepted": None, "margin": None, "vad_coverage": None,
-                    "artifact_score": None, "reason": "no_overlap_clip",
+                    "accepted": None, "mean_variance": None, "margin": None,
+                    "vad_coverage": None, "artifact_score": None,
+                    "reason": "no_overlap_clip",
                 })
             else:
                 row.update({
-                    "accepted": result.accepted, "margin": result.margin,
-                    "vad_coverage": result.vad_coverage,
+                    "accepted": result.accepted, "mean_variance": result.mean_variance,
+                    "margin": result.margin, "vad_coverage": result.vad_coverage,
                     "artifact_score": result.artifact_score, "reason": result.reason,
                 })
             gate_rows.append(row)

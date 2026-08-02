@@ -79,6 +79,11 @@ class Wsj0MixDataset(SceneDataset):
         # rationale as LibriMixDataset.
         self.min_solo = int(round(float(cfg.get("min_solo_ms", 1000.0)) / 1000.0 * self.sample_rate))
         self.limit = cfg.get("limit")
+        # Rows to skip before `limit`; see LibriMixDataset.offset for why (a
+        # dev split disjoint from the training slice). Defaults to 0.
+        self.offset = int(cfg.get("offset", 0))
+        if self.offset < 0:
+            raise ValueError(f"offset must be >= 0, got {self.offset}.")
         self.data_root = resolve_data_root()
         ensure_access(self.data_root)
 
@@ -92,6 +97,7 @@ class Wsj0MixDataset(SceneDataset):
     def _read_lines(self) -> list[str]:
         text = self.metadata.read_text(encoding="utf-8").splitlines()
         lines = [ln.strip() for ln in text if ln.strip()]
+        lines = lines[self.offset:]
         if self.limit is not None:
             lines = lines[: int(self.limit)]
         return lines
