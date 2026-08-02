@@ -292,6 +292,161 @@ def score_scene(
     return rows, gate_rows
 
 
+def _select(rows: list[dict], **equals) -> list[dict]:
+    """Rows matching every ``field=value`` constraint."""
+    return [r for r in rows if all(r[field] == value for field, value in equals.items())]
+
+
+def _clipped(rows: list[dict]) -> list[float]:
+    """Scoreable SI-SDR values: nan dropped, +-inf clipped to +-SI_SDR_CAP_DB."""
+    return [c for c in (_clip_score(r["si_sdr"]) for r in rows) if c is not None]
+
+
+def _spread_section(rows: list[dict], depths: list[int]) -> list[str]:
+    """Mean alone can't distinguish "consistently mediocre" from "usually great
+    with a few bad scenes" -- and the Phase 1 precedent (a +2.35 dB mean at a
+    50% win rate) is exactly that failure. Percentiles are preferred to raw
+    min/max as the headline spread because one freak-bad scene moves min but
+    not p5; both are reported.
+    """
+    lines = [
+        "", "## Spread (per system/depth)", "",
+        f"(p95 saturates at the +-{SI_SDR_CAP_DB:.0f} dB clip wherever the diagnostic-counts "
+        "table shows many perfect/failed rows -- at depth 1 most rows are solo copy-through "
+        "and legitimately +inf, so a p95 of exactly the cap there is expected, not a bug)",
+        "",
+        "| system | depth | n | mean | p5 | p95 | min | max |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for system_name in SYSTEMS:
+        for k in depths:
+            values = _clipped(_select(rows, system=system_name, depth=k))
+            if not values:
+                lines.append(f"| {system_name} | {k} | 0 | -- | -- | -- | -- | -- |")
+                continue
+            a = np.asarray(values, dtype=np.float64)
+            lines.append(
+                f"| {system_name} | {k} | {len(values)} | {a.mean():.2f} | "
+                f"{np.percentile(a, 5):.2f} | {np.percentile(a, 95):.2f} | "
+                f"{a.min():.2f} | {a.max():.2f} |"
+            )
+    return lines
+
+
+def _accumulation_section(rows: list[dict], depths: list[int]) -> list[str]:
+    """SI-SDR by how many prior estimates were deflated into the residual.
+
+    This is the axis Theorem 3's ``L*||E_(m-1)||`` penalty is indexed by, and
+    unlike a cross-eval-set sweep over ``m`` it is a WITHIN-SCENE control: one
+    m-speaker scene contributes rows at accumulation 0..m-1 with the acoustics,
+    the enrollment, and the checkpoint all held fixed. If deflation accumulates
+    error, ungated_deflation declines along this axis at every fixed depth,
+    while the accumulation-free systems (shown as the n/a reference row) have
+    no such axis at all.
+    """
+    lines = [
+        "", "## SI-SDR by accumulation (`n_accepted_before` -- prior estimates subtracted "
+        "into the residual before this speaker was extracted)", "",
+        "(within-scene control: depth is held fixed down each column, so a decline "
+        "across rows is accumulation, not intrinsic overlap difficulty)", "",
+        "| system | n_accepted_before | " + " | ".join(f"depth {k}" for k in depths) + " |",
+        "|---|---" + "|---" * len(depths) + "|",
+    ]
+
+    def _row(label: str, subset: list[dict]) -> str:
+        cells = []
+        for k in depths:
+            values = _clipped(_select(subset, depth=k))
+            cells.append(f"{np.mean(values):.2f} (n={len(values)})" if values else "--")
+        return f"| {label} | " + " | ".join(cells) + " |"
+
+    for system_name in DEFLATION_SYSTEMS:
+        subset = _select(rows, system=system_name)
+        for count in sorted({r["n_accepted_before"] for r in subset}):
+            lines.append(_row(f"{system_name} | {count}", _select(subset, n_accepted_before=count)))
+    for system_name in SYSTEMS:
+        if system_name not in DEFLATION_SYSTEMS:
+            lines.append(_row(f"{system_name} | n/a", _select(rows, system=system_name)))
+    return lines
+
+
+def _paired_section(rows: list[dict], depths: list[int], system_a: str, system_b: str) -> list[str]:
+    """Per-row paired difference ``system_a - system_b``, joined on
+    ``(scene, speaker, depth)``.
+
+    Both systems score the same speakers over the same depth array, so the key
+    sets are identical and the join is lossless -- asserted below rather than
+    assumed, since a silent partial join would quietly change what the win rate
+    is a rate *of*.
+    """
+    def index(system_name: str) -> dict[tuple, float]:
+        out = {}
+        for r in _select(rows, system=system_name):
+            score = _clip_score(r["si_sdr"])
+            if score is not None:
+                out[(r["scene"], r["speaker"], r["depth"])] = score
+        return out
+
+    idx_a, idx_b = index(system_a), index(system_b)
+    shared = set(idx_a) & set(idx_b)
+    lines = [
+        "", f"## Paired difference: {system_a} - {system_b}", "",
+        f"(joined on (scene, speaker, depth); {len(shared)} paired rows out of "
+        f"{len(idx_a)}/{len(idx_b)} scoreable per system. A positive mean with a "
+        "~50% win rate means the margin comes from a few large wins, not broad "
+        "superiority -- that was the Phase 1 result, so it is reported here.)", "",
+        "| depth | pairs | mean diff | median | p5 | p95 | win rate |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for k in depths:
+        diffs = [idx_a[key] - idx_b[key] for key in shared if key[2] == k]
+        if not diffs:
+            lines.append(f"| {k} | 0 | -- | -- | -- | -- | -- |")
+            continue
+        a = np.asarray(diffs, dtype=np.float64)
+        win_rate = float(np.mean(a > 0)) * 100.0
+        lines.append(
+            f"| {k} | {len(diffs)} | {a.mean():.2f} | {np.median(a):.2f} | "
+            f"{np.percentile(a, 5):.2f} | {np.percentile(a, 95):.2f} | {win_rate:.1f}% |"
+        )
+    return lines
+
+
+def _gate_section(gate_rows: list[dict]) -> list[str]:
+    """Confidence-gate accept rates, per system and round.
+
+    Counted from the gate rows (one decision per speaker/round), never from the
+    score rows -- a decision duplicated across every depth a speaker spans would
+    inflate this by a depth-dependent factor. A ~100% accept rate means the gate
+    is rubber-stamping and its thresholds are inert; a ~0% rate means
+    gated_deflation has degenerated into no_recursion. Both are degenerate, and
+    neither is visible from SI-SDR alone.
+    """
+    lines = [
+        "", "## Confidence gate", "",
+        "| system | round | decisions | accepted | accept rate | no clip | reasons (rejections) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for system_name in sorted({r["system"] for r in gate_rows}):
+        subset = _select(gate_rows, system=system_name)
+        for round_index in sorted({r["round"] for r in subset}):
+            per_round = _select(subset, round=round_index)
+            decided = [r for r in per_round if r["accepted"] is not None]
+            accepted = [r for r in decided if r["accepted"]]
+            no_clip = len(per_round) - len(decided)
+            rate = f"{100.0 * len(accepted) / len(decided):.1f}%" if decided else "--"
+            reasons: dict[str, int] = {}
+            for r in decided:
+                if not r["accepted"]:
+                    reasons[r["reason"]] = reasons.get(r["reason"], 0) + 1
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())) or "--"
+            lines.append(
+                f"| {system_name} | {round_index} | {len(decided)} | {len(accepted)} | "
+                f"{rate} | {no_clip} | {summary} |"
+            )
+    return lines
+
+
 def _write_results(rows: list[dict], gate_rows: list[dict], out_dir: Path, stem: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / f"{stem}.csv"
@@ -349,6 +504,16 @@ def _write_results(rows: list[dict], gate_rows: list[dict], out_dir: Path, stem:
         for k in depths:
             d = diagnostics[system_name][k]
             lines.append(f"| {system_name} | {k} | {d['nan']} | {d['perfect']} | {d['failed']} | {d['scored']} |")
+
+    lines += _spread_section(rows, depths)
+    lines += _accumulation_section(rows, depths)
+    # The thesis (accumulation-free beats deflation) and the control comparison
+    # (does refinement actually help, or does it cost quality vs. not recursing
+    # at all?) -- both draw audio from the same reconstruct_all, so a negative
+    # second table isolates the embedding refinement as the cause.
+    lines += _paired_section(rows, depths, "coarse_to_fine", "ungated_deflation")
+    lines += _paired_section(rows, depths, "coarse_to_fine", "no_recursion")
+    lines += _gate_section(gate_rows)
 
     lines += ["", "## Ordering check (3+ speaker overlaps, deepest available depth)"]
     if depths:
