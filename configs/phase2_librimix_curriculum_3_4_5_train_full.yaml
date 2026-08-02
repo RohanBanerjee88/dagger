@@ -1,0 +1,75 @@
+# Scaled-up curriculum run: 650 scenes/depth (1950 total) -- exactly 5x
+# configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml's 130/depth, mirroring
+# the same 5x jump (400 -> 2000 scenes) that took Phase 1 from an inconclusive
+# pilot to its actual DoD-worthy result. Same epoch count (15) and all other
+# hyperparameters as the pilot -- only the scene count changes, so any
+# improvement can be attributed to more data, not a confounded recipe change.
+#
+# Budget, from the pilot's own measured per-epoch cost (NOT an extrapolation --
+# CLAUDE.md Phase 2 status, 2026-07-31): 407.7s/epoch @ 390 scenes = 1.045
+# s/scene/epoch; setup (loaders + enrollment for all 3 depths + warm start) 337.8s
+# @ 390 scenes = ~0.87s/scene. At 1950 scenes: setup ~1689s + training
+# 1950*1.045*15 ~= 30574s => total ~32263s ~= 8.96h -- comfortable margin under
+# the ~12h (43200s) ceiling this project measured once before (CLAUDE.md's
+# 2026-07-27 "Fine-tune attempt" SIGKILL note).
+#
+# No new metadata needed -- extend_librimix_metadata.py already ran against the
+# full libri3mix_train-360.csv, so the x4/x5 train CSVs have far more than 650
+# rows available; this is purely a `limit:` bump from the pilot config.
+#
+# Warm-started from the PILOT curriculum checkpoint (not the depth-5-only one)
+# since it already has real multi-depth exposure -- no reason to discard that
+# and start the multi-depth adaptation over.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360.csv
+    n_src: 3
+    placement: scheduled
+    min_solo_ms: 1000.0
+    limit: 650
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360_x4.csv
+    n_src: 4
+    placement: scheduled
+    min_solo_ms: 1000.0
+    limit: 650
+  - name: librimix
+    metadata: metadata/Libri3Mix/libri3mix_train-360_x5.csv
+    n_src: 5
+    placement: scheduled
+    min_solo_ms: 1000.0
+    limit: 650
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6   # MUST match checkpoints/phase2/proposed_librimix_curriculum_3_4_5.pt's
+                         # architecture exactly -- load_state_dict raises otherwise
+
+train:
+  system: proposed
+  epochs: 15
+  batch_size: 4
+  segment_seconds: 4.0
+  lr: 0.0003
+  grad_clip: 10.0
+  checkpoint_every: 5    # periodic overwrite -- protects progress if this ~9h run
+                         # gets interrupted; the latest saved epoch survives
+  init_checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5.pt   # warm start
+                                                                               # from the pilot
+                                                                               # curriculum checkpoint
+  checkpoint_out: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_full.pt   # NEW path --
+                                                                                   # never overwrites
+                                                                                   # the pilot checkpoint

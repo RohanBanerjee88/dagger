@@ -569,10 +569,47 @@ depths" on top of that). Needs n_src=4 training-split metadata generated first (
 generated for the depth-5 pilot but Kaggle sessions don't persist, so regenerate both if starting
 fresh) -- the command is in the config's header comment. Matching eval configs
 (`phase2_librimix_{3,4,5}spk_eval_curriculum.yaml`, tag `curriculum345`) are ready to compare against
-both the pre-Stage-1 zero-shot numbers and the single-depth pilot's numbers logged above. **Decision
-gate, not yet executed:** does training on a mix of depths widen the accumulation-specific gap (or at
-least stop narrowing it) while not regressing depths it wasn't the *primary* focus of, the way the
-single-depth pilot regressed depth 2-3 after specializing on depth 5?
+both the pre-Stage-1 zero-shot numbers and the single-depth pilot's numbers logged above.
+
+**Decision-gate result (2026-07-31): first clean widening signal in the whole investigation.**
+Evaluated the curriculum checkpoint on all three test sets (native 3-speaker, 4-speaker, 5-speaker).
+Ordering (`coarse_to_fine > gated_deflation > ungated_deflation`) holds cleanly at every depth 2
+through 5 across all three runs, no exceptions. Comparing the accumulation-specific gap
+(coarse_to_fine minus ungated_deflation) against the single-depth-5 pilot on the two test sets where
+a matching pilot number exists (the pilot was never evaluated on the native 3-speaker set):
+
+| depth | eval set | pilot gap | curriculum gap | change |
+|---|---|---|---|---|
+| 2 | 4spk-test | 4.10 | 5.34 | +1.24 |
+| 3 | 4spk-test | 2.47 | 3.37 | +0.90 |
+| 4 | 4spk-test | 1.75 | 2.34 | +0.59 |
+| 2 | 5spk-test | 4.22 | 5.07 | +0.85 |
+| 3 | 5spk-test | 3.77 | 4.49 | +0.72 |
+| 4 | 5spk-test | 2.58 | 2.61 | +0.03 (flat) |
+| 5 | 5spk-test | 1.88 | 2.38 | +0.50 |
+
+Six of seven widened, one flat, zero narrowed -- the first time any intervention in this investigation
+has widened the gap rather than narrowing it (a fixed-depth fine-tune, and normalization bundled with
+one, both narrowed it). Mechanism: the widening is driven mostly by the deflation systems getting
+*worse* under curriculum training (ungated dropped 0.5-1.0 dB at most depths, gated a smaller but
+consistent 0.1-0.2 dB), not by `coarse_to_fine` improving sharply -- `no_recursion`/`coarse_to_fine`
+held essentially flat at every depth (≤0.3 dB moves), avoiding the depth-2/3 regression the
+single-depth pilot caused. Plausible explanation: `G` is never trained on residual/corrupted input
+(deflation only hands it one at *inference* time); curriculum training makes `G` a sharper extractor
+for genuine clean-mixture input across a range of depths, and that specialization doesn't transfer to
+-- and may actively hurt -- robustness against the residual corruption deflation feeds it.
+
+Caveat: the native-3-speaker-test comparison against the original 2026-07-29 depth-3-only checkpoint
+(gap dropped 4.13→2.28) is confounded -- that baseline predates Stage 1, so the comparison mixes
+"curriculum vs. single-depth" with "pre- vs. post-normalization code" and a specialist-vs-generalist
+checkpoint tradeoff. Not read as contradicting the clean 4spk/5spk-test comparisons above, which hold
+code and eval harness fixed and vary only the training data.
+
+**Absolute quality is still poor at depth 4-5** (roughly -4 to -8 dB across systems) even with the
+gap now widening correctly -- this pilot was sized as a cheap mechanism check (130 scenes/depth, 15
+epochs), not a quality-maximizing run. Next candidate: scale the curriculum run up (more scenes/
+epochs per depth, mirroring the 400→2000-scene jump that produced Phase 1's actual DoD-worthy
+numbers) now that the mechanism itself is validated as directionally correct.
 
 ### ☐ Phase 3 — Real diarization + robustness
 
@@ -640,20 +677,19 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-31 — Depth-agnostic extractor investigation, Stage 2 (multi-depth curriculum
-training) implemented and unit-tested; not yet run on real data. `scripts/train_phase1.py` now
-accepts `dataset:` as a list of per-depth configs -- one loader per depth, one shared model/optimizer,
-batches interleaved in a per-epoch-shuffled order across loaders (every individual batch still comes
-from exactly one loader, so no custom collate/padding was needed). A single-entry list reduces to the
-prior single-dataset behavior exactly. Two new tests (`build_dataset`/`TitaNetEncoder` faked, no real
-corpus/GPU needed) verify a 2-depth run trains and records both depths, and the single-dict backward-
-compat path is unaffected; full suite green (204/204).
-`configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml` (n_src 3/4/5, ~130 scenes/depth, 15
-epochs, warm-started from the depth-5 pilot checkpoint) plus matching eval configs
-(tag `curriculum345`) are ready but not yet run. Decision gate: does training on a mix of depths widen
-the accumulation-specific gap (or at least stop narrowing it) without regressing untargeted depths,
-unlike every single-depth fine-tune tried so far. Plan: `~/.claude/plans/ok-while-i-am-humble-rain.md`.
-Previously: 2026-07-31 — Stage 1 decision-gate result: the pilot fine-tune (normalization + depth-5
+*Last updated: 2026-07-31 — Depth-agnostic extractor investigation, Stage 2 decision-gate result:
+the curriculum checkpoint (trained on a mix of n_src 3/4/5 in one run) is the first intervention in
+this whole investigation to *widen* the accumulation-specific gap rather than narrow it -- six of
+seven depth-comparisons widened (+0.5 to +1.2 dB) against the single-depth-5 pilot, one flat, zero
+narrowed, with ordering holding cleanly at every depth 2-5 across all three eval sets. Driven mostly
+by the deflation systems getting worse under broader training, not by coarse_to_fine improving
+sharply; no_recursion/coarse_to_fine held flat, avoiding the depth-2/3 regression the single-depth
+pilot caused. Absolute quality is still poor at depth 4-5 (~-4 to -8 dB) -- this was a small
+mechanism-check pilot (130 scenes/depth, 15 epochs), not a quality-maximizing run. Next: scale the
+curriculum run up now that the mechanism is validated. Plan: `~/.claude/plans/ok-while-i-am-humble-rain.md`.
+Previously: 2026-07-31 — Stage 2 (multi-depth curriculum training) implemented and unit-tested (see
+`scripts/train_phase1.py`'s list-of-datasets support, two new tests, full suite 204/204) before being
+run above. Before that: 2026-07-31 — Stage 1 decision-gate result: the pilot fine-tune (normalization + depth-5
 exposure, warm-started from the depth-3 checkpoint) ran clean (loss 4.80→1.59 monotonically over 15
 epochs) and raised the depth 4-5 floor sharply for the deflation systems (+1.9 to +4.9 dB) and
 modestly for the accumulation-free systems at depth 4 only (depth 5 slightly regressed, -0.7 to
