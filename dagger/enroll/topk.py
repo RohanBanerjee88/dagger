@@ -69,6 +69,7 @@ def select_topk_solo_clips(
     k: int = 3,
     min_clip_ms: float = 500.0,
     activity_i: np.ndarray | None = None,
+    budget_ms: float | None = None,
 ) -> list[np.ndarray]:
     """Return up to ``k`` longest solo clips for one speaker, longest first.
 
@@ -77,6 +78,32 @@ def select_topk_solo_clips(
     asserts ``solo_i`` is a subset of it -- a direct guard against the
     "enrollment taken from overlap by accident" red flag. Runs shorter than
     ``min_clip_ms`` are dropped (too little audio for a stable embedding).
+
+    ``budget_ms`` truncates each selected clip to at most that many
+    milliseconds (taken from its start; no RNG, so a run is reproducible).
+    ``None`` -- the default -- keeps every clip whole, which is the behavior of
+    every config that predates this argument.
+
+    It exists to answer whether coarse-to-fine refinement pays when enrollment
+    is *starved*: refinement blends the solo-derived embedding toward one
+    computed from extracted overlap audio, which only helps if the solo clip is
+    the weaker estimate. Deliberately starving enrollment is the controlled way
+    to test that, and capping the clip does it WITHOUT touching scene geometry
+    -- unlike ``dataset.min_solo_ms``, which changes placement, depth
+    distribution, and achieved overlap, making every sweep point a different
+    dataset. Here the mixtures, ``x_O``, and depth arrays stay byte-identical
+    across the sweep, so results can be paired row by row.
+
+    Two deliberate interactions:
+
+    * The ``min_clip_ms`` filter is applied to the run's ORIGINAL length,
+      before truncation. So a budget below ``min_clip_ms`` still yields a clip
+      rather than rejecting the speaker -- starving enrollment is the point of
+      the knob, and the stability floor must not silently veto it.
+    * Truncation does not change how many clips are selected, so ``clip_count``
+      and hence ``V_i`` keep their meaning across the sweep. (Capping a total
+      budget across clips would drop clips and collapse ``V_i`` to zero,
+      confounding the experiment with a change in the variance signal.)
     """
     solo_i = np.asarray(solo_i)
     if not solo_i.any():
@@ -100,7 +127,11 @@ def select_topk_solo_clips(
     runs.sort(key=lambda run: run[1] - run[0], reverse=True)
 
     mixture = np.asarray(mixture)
-    return [mixture[start:end] for start, end in runs[:k]]
+    selected = runs[:k]
+    if budget_ms is not None:
+        budget = max(1, int(round(budget_ms / 1000.0 * sample_rate)))
+        selected = [(start, min(end, start + budget)) for start, end in selected]
+    return [mixture[start:end] for start, end in selected]
 
 
 def mean_embedding(
@@ -123,10 +154,17 @@ def enroll_speaker(
     encoder: SpeakerEncoder,
     k: int = 3,
     min_clip_ms: float = 500.0,
+    budget_ms: float | None = None,
 ) -> EnrollmentResult:
-    """Build one speaker's :class:`EnrollmentResult` from their solo region."""
+    """Build one speaker's :class:`EnrollmentResult` from their solo region.
+
+    ``budget_ms`` caps how much audio each selected clip contributes -- see
+    :func:`select_topk_solo_clips` for what it is for and why it caps per clip.
+    ``None`` (default) preserves every pre-existing config's behavior exactly.
+    """
     clips = select_topk_solo_clips(
-        mixture, solo_i, sample_rate, k=k, min_clip_ms=min_clip_ms, activity_i=activity_i
+        mixture, solo_i, sample_rate, k=k, min_clip_ms=min_clip_ms,
+        activity_i=activity_i, budget_ms=budget_ms,
     )
     embedding, variance = mean_embedding(clips, sample_rate, encoder)
     return EnrollmentResult(embedding=embedding, variance=variance, clip_count=len(clips))

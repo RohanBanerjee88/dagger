@@ -159,6 +159,7 @@ def score_scene(
     fade: int,
     enroll_k: int,
     min_clip_ms: float,
+    enroll_budget_ms: float | None,
     encoder: TitaNetEncoder,
     extractor: TFGridNetCrossAttnExtractor,
     gate_cfg: dict,
@@ -184,7 +185,7 @@ def score_scene(
     enrollments = [
         enroll_speaker(
             scene.mixture, solo[i], activity[i], scene.sample_rate,
-            encoder, k=enroll_k, min_clip_ms=min_clip_ms,
+            encoder, k=enroll_k, min_clip_ms=min_clip_ms, budget_ms=enroll_budget_ms,
         )
         for i in range(num_speakers)
     ]
@@ -547,6 +548,14 @@ def main() -> int:
     enroll_cfg = cfg.get("enroll", {})
     enroll_k = int(enroll_cfg.get("k", 3))
     min_clip_ms = float(enroll_cfg.get("min_clip_ms", 500.0))
+    # Cap on how much solo audio each enrollment clip contributes. None (the
+    # default) means whole clips -- every config predating this key is
+    # unaffected. Used by the enrollment-budget sweep to test whether
+    # coarse-to-fine refinement pays once the solo embedding is the weaker
+    # estimate; capping the clip leaves scene geometry untouched, so sweep
+    # points stay row-for-row comparable.
+    enroll_budget_raw = enroll_cfg.get("budget_ms")
+    enroll_budget_ms = None if enroll_budget_raw is None else float(enroll_budget_raw)
 
     extractor_cfg = dict(cfg.get("extractor", {}))
     checkpoint_path = extractor_cfg.pop("checkpoint", None)
@@ -564,7 +573,8 @@ def main() -> int:
     for scene in dataset:
         try:
             scene_rows, scene_gate_rows = score_scene(
-                scene, fade, enroll_k, min_clip_ms, encoder, extractor, gate_cfg, refine_rounds,
+                scene, fade, enroll_k, min_clip_ms, enroll_budget_ms,
+                encoder, extractor, gate_cfg, refine_rounds,
             )
         except NoSoloRegionError as exc:
             reason = str(exc)

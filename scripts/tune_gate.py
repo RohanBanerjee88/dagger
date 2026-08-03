@@ -114,6 +114,7 @@ def measure_scene(
     fade: int,
     enroll_k: int,
     min_clip_ms: float,
+    enroll_budget_ms: float | None,
     encoder: TitaNetEncoder,
     extractor: TFGridNetCrossAttnExtractor,
 ) -> list[dict]:
@@ -138,7 +139,7 @@ def measure_scene(
     enrollments = [
         enroll_speaker(
             scene.mixture, solo[i], activity[i], scene.sample_rate,
-            encoder, k=enroll_k, min_clip_ms=min_clip_ms,
+            encoder, k=enroll_k, min_clip_ms=min_clip_ms, budget_ms=enroll_budget_ms,
         )
         for i in range(num_speakers)
     ]
@@ -154,6 +155,7 @@ def measure_scene(
             result = enroll_speaker(
                 scene.mixture, _contaminated_mask(activity[i], overlap), activity[i],
                 scene.sample_rate, encoder, k=enroll_k, min_clip_ms=min_clip_ms,
+                budget_ms=enroll_budget_ms,
             )
         except NoSoloRegionError:
             contaminated_variances.append(None)
@@ -365,6 +367,10 @@ def main() -> int:
     enroll_cfg = cfg.get("enroll", {})
     enroll_k = int(enroll_cfg.get("k", 3))
     min_clip_ms = float(enroll_cfg.get("min_clip_ms", 500.0))
+    # Honored here too so one `enroll:` block means the same thing in every
+    # script; see dagger.enroll.topk.select_topk_solo_clips.
+    enroll_budget_raw = enroll_cfg.get("budget_ms")
+    enroll_budget_ms = None if enroll_budget_raw is None else float(enroll_budget_raw)
 
     extractor_cfg = dict(cfg.get("extractor", {}))
     checkpoint_path = extractor_cfg.pop("checkpoint", None)
@@ -387,7 +393,7 @@ def main() -> int:
         for scene in dataset:
             try:
                 scene_rows = measure_scene(
-                    scene, fade, enroll_k, min_clip_ms, encoder, extractor,
+                    scene, fade, enroll_k, min_clip_ms, enroll_budget_ms, encoder, extractor,
                 )
             except NoSoloRegionError as exc:
                 skipped += 1
