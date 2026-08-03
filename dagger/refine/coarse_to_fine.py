@@ -76,6 +76,16 @@ def refine_embeddings(
     rejected candidate leaves that speaker's embedding unchanged for the next
     round.
 
+    The gate judges the re-embedded clip against the speaker's CURRENT
+    embedding, never against the blended candidate -- see the comment at the
+    call site for why a blended reference silently defeats the margin. Note the
+    reference does move across rounds (an accepted update changes it), so with
+    many rounds the anchor could drift along with the thing it is judging; at
+    the default ``rounds=2`` an accepted embedding stays within 3/4 of the way
+    from the original enrollment, which bounds that. If drift ever looks like a
+    problem, anchoring on ``initial_embeddings[i]`` instead is the one-line
+    alternative -- it trades drift-immunity for an increasingly stale reference.
+
     Returns ``(final_embeddings, round_results)`` -- the caller (e.g.
     ``scripts/run_phase2.py``) makes one final ``reconstruct_all`` call with
     ``final_embeddings`` to get the actual output audio; this function never
@@ -109,7 +119,24 @@ def refine_embeddings(
             result = confidence_gate(
                 clip,
                 sample_rate,
-                blended,
+                # The CURRENT embedding, not `blended`. Passing the blend made
+                # the margin self-referential: identity_margin embeds `clip`
+                # (that is `raw_embedding`) and compares it against
+                # `embedding_self`, so a blend containing 0.5*raw_embedding is
+                # half-made of the very thing being judged. For a candidate at
+                # angle theta from the enrollment that replaces cos(theta) with
+                # cos(theta/2) -- inflating the "same" term for every candidate,
+                # and inflating it MOST for the worst ones (at 90 degrees,
+                # 0.00 becomes 0.71), which is backwards for a gate. Symptom in
+                # the 2026-08-02 Phase 2 runs: a 98-99% accept rate that did not
+                # move with speaker count, while the identically-thresholded
+                # gate in dagger.reconstruct.deflation tracked difficulty
+                # correctly (71.8% -> 61.2% -> 54.1% at m=3/4/5).
+                # This restores CLAUDE.md §2's definition,
+                # M_i = cos(s_hat_i, e_i) - max_{j!=i} cos(s_hat_i, e_j), and
+                # matches how scripts/run_phase2.py's deflation gate already
+                # calls it.
+                embeddings[i],
                 others,
                 encoder,
                 enrollment_variances[i],

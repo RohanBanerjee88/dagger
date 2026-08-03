@@ -24,6 +24,7 @@ import dagger.refine.coarse_to_fine as coarse_to_fine_module
 from dagger.audio.provenance import original_mixture
 from dagger.extract.base import Extractor
 from dagger.gate.confidence import GateResult
+from dagger.metrics.speaker_similarity import cosine_similarity
 from dagger.reconstruct.stitch import reconstruct_all
 from dagger.refine.coarse_to_fine import _longest_run, refine_embeddings
 
@@ -72,6 +73,69 @@ class TestLongestRun:
 
     def test_picks_the_longest_of_several_runs(self):
         assert _longest_run(np.array([1, 0, 1, 1, 1, 0, 1])) == (2, 5)
+
+
+class TestGateIsNotSelfReferential:
+    """The margin must judge the re-embedded clip against the speaker's own
+    embedding, never against the blended candidate.
+
+    ``identity_margin`` embeds ``clip`` and compares the result to
+    ``embedding_self``. If ``embedding_self`` is ``0.5*e_i + 0.5*raw`` -- half
+    made of that very embedding -- the similarity becomes ``cos(theta/2)``
+    instead of ``cos(theta)``, which inflates every candidate and inflates the
+    worst ones most. That defeats the gate silently: it keeps accepting, and
+    its accept rate stops responding to estimate quality at all.
+    """
+
+    _gate_kwargs = dict(tau_margin=0.0, max_mean_variance=1.0, min_vad_coverage=0.0, max_artifact_score=10.0)
+
+    def test_gate_receives_the_current_embedding_not_the_blend(self, monkeypatch, fake_encoder):
+        x, x_O, activity, solo = _scene()
+        extractor = _AddEmbeddingExtractor()
+        embeddings = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        variances = np.array([[0.001, 0.001, 0.001], [0.001, 0.001, 0.001]])
+        seen: list[tuple[np.ndarray, np.ndarray]] = []
+
+        def recording_gate(estimate, sample_rate, embedding_self, embeddings_others, *a, **k):
+            seen.append((np.array(embedding_self), np.array(k["precomputed_embedding"])))
+            return GateResult(False, 1.0, 1.0, 0.0, "rejected")
+
+        monkeypatch.setattr(coarse_to_fine_module, "confidence_gate", recording_gate)
+
+        refine_embeddings(
+            x, x_O, activity, solo, embeddings, variances, extractor, fake_encoder, SAMPLE_RATE,
+            rounds=1, **self._gate_kwargs,
+        )
+
+        assert seen, "gate was never called"
+        for speaker_index, (embedding_self, raw) in enumerate(seen):
+            np.testing.assert_allclose(embedding_self, embeddings[speaker_index])
+            # The blend is what would have been passed before the fix; assert we
+            # are not passing it, and that the reference is not contaminated by
+            # the clip's own embedding.
+            blended = 0.5 * embeddings[speaker_index] + 0.5 * raw
+            assert not np.allclose(embedding_self, blended), (
+                "gate reference is the blended candidate -- the margin is self-referential"
+            )
+
+    def test_a_wrong_candidate_scores_lower_than_the_blend_would_have(self, fake_encoder):
+        """The concrete consequence, on the margin arithmetic itself.
+
+        For a candidate at angle theta from the enrollment, an honest reference
+        gives cos(theta) while a blended one gives cos(theta/2). At 90 degrees
+        that is 0.00 vs 0.71 -- the difference between rejecting a completely
+        wrong candidate and comfortably accepting it.
+        """
+        enrollment = np.array([1.0, 0.0])
+        wrong = np.array([0.0, 1.0])  # 90 degrees away -- maximally wrong
+        blended = 0.5 * enrollment + 0.5 * wrong
+
+        honest = cosine_similarity(wrong, enrollment)
+        self_referential = cosine_similarity(wrong, blended)
+
+        assert honest == pytest.approx(0.0, abs=1e-9)
+        assert self_referential == pytest.approx(np.sqrt(0.5), abs=1e-9)
+        assert self_referential > honest
 
 
 class TestRefineEmbeddingsAcceptReject:
