@@ -125,8 +125,23 @@ class LibriMixDataset(SceneDataset):
         sources_raw: list[np.ndarray] = []
         gains: list[float] = []
         for k in range(1, self.n_src + 1):
-            path = _resolve_source_path(row[f"source_{k}_path"], self.data_root)
-            sources_raw.append(read_wav(path, self.sample_rate))
+            # A source may be several utterances of the SAME speaker, written
+            # "pathA|pathB" and concatenated here. That is what lets a speaker's
+            # solo region and their overlapped speech come from *different
+            # recordings* -- in a single-utterance row the scheduler just splits
+            # one continuous recording in two, so the overlap contains nothing
+            # the solo clip doesn't already, which caps how much embedding
+            # refinement could ever recover. A plain path (no "|") is the
+            # single-utterance case and is unchanged.
+            paths = [
+                _resolve_source_path(part, self.data_root)
+                for part in row[f"source_{k}_path"].split("|")
+            ]
+            chunks_for_source = [read_wav(path, self.sample_rate) for path in paths]
+            sources_raw.append(
+                chunks_for_source[0] if len(chunks_for_source) == 1
+                else np.concatenate(chunks_for_source)
+            )
             gains.append(float(row.get(f"source_{k}_gain", 1.0)))
 
         lengths = [len(s) for s in sources_raw]

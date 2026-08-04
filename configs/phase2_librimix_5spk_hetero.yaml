@@ -1,0 +1,66 @@
+# Experiment 2 (treatment arm): does coarse-to-fine refinement pay when the
+# enrollment recording is NOT the recording being extracted?
+#
+# Each speaker contributes two utterances ("pathA|pathB", concatenated by the
+# loader). Utterance A fills the solo slot that enrollment reads; B is the
+# overlapped speech that G extracts and refinement re-embeds.
+#
+#   A and B from DIFFERENT chapters: different reading sessions, so the enrollment
+#   does not describe the overlapped speech. This is the arm where refinement
+#   has something to recover.
+#
+# Run BOTH arms and compare. They differ only in that pairing -- same scene
+# geometry, same min_solo, same checkpoint -- so comparing them isolates
+# heterogeneity. Comparing either against the stock 5-speaker result would
+# instead confound pairing with scene length and min_solo, which changed too.
+#
+# min_solo_ms MUST equal the generator's --solo-sec (7.0 s), so the solo
+# slot is always a prefix of utterance A and never spills into B.
+#
+# Build the metadata first:
+#   python scripts/build_heterogeneous_metadata.py \
+#       --librispeech-root $DAGGER_DATA_ROOT/LibriSpeech/test-clean \
+#       --output $DAGGER_DATA_ROOT/metadata/Libri3Mix/libri3mix_hetero_5spk.csv \
+#       --n-src 5 --num-scenes 150 --pairing different-chapter --solo-sec 7.0
+#
+# Read the "coarse_to_fine - no_recursion" paired table, with win/tie/loss. A
+# high tie count means the gate rejected nearly everything and the comparison
+# degenerated -- that outcome is not evidence either way.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_hetero_5spk.csv
+  n_src: 5
+  placement: scheduled
+  min_solo_ms: 7000.0
+  limit: 150
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_full.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results
+  tag: hetero
