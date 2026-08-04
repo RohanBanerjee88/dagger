@@ -1,0 +1,61 @@
+# Experiment 2, control arm, sized for a ~2 h GPU budget (CLAUDE.md Phase 2).
+#
+# Each speaker contributes two utterances ("pathA|pathB", concatenated by the
+# loader). The solo slot -- all enrollment reads -- is a prefix of A; the overlap
+# region that G extracts and refinement re-embeds is almost entirely B.
+#
+#   A and B adjacent within ONE chapter -- as close to a single continuous
+#   recording as two utterances get. Refinement should have nothing to add.
+#
+# min_solo_ms MUST equal the generator's --solo-sec (4.0 s) so the solo slot
+# never spills into B.
+#
+# Sizing: n_src=3 and a 4 s solo slot keep scenes near 21 s, about the
+# length of the stock 5-speaker runs, so this costs ~40 min rather than ~2.7 h.
+# 4 s is still 4x the enrollment audio every previous run used (min_solo_ms:
+# 1000), which matters: the enrollment-budget sweep failed because starving
+# enrollment degraded extraction until the gate rejected everything. Erring
+# toward MORE enrollment keeps the gate open so refinement gets a fair trial.
+#
+# Read the "coarse_to_fine - no_recursion" paired table with win/tie/loss. A
+# positive mean with wins exceeding losses on a substantial number of non-tie
+# rows is the result. A near-zero mean with 90%+ ties is the degenerate case --
+# the gate rejected everything -- and is not evidence either way.
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_homo_3spk.csv
+  n_src: 3
+  placement: scheduled
+  min_solo_ms: 4000.0
+  limit: 150
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_full.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results
+  tag: homo3
