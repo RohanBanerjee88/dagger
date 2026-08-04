@@ -1,5 +1,5 @@
 # Same as phase2_librimix_3spk_eval_curriculum.yaml but pointed at the SCALED-UP
-# curriculum checkpoint (configs/phase2_librimix_curriculum_3_4_5_train_full.yaml,
+# curriculum checkpoint (configs/phase2/experiments/phase2_librimix_curriculum_3_4_5_train_full.yaml,
 # 650 scenes/depth vs the pilot's 130) instead of the pilot-scale one. Writes
 # results/phase2_librimix_3spk_curriculum345full.{csv,md} -- never overwrites the
 # pilot-scale results/phase2_librimix_3spk_curriculum345.{csv,md}.

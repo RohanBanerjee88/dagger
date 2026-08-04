@@ -18,7 +18,7 @@ Writes the Phase 1 definition-of-done artifact to
 ``results/phase1_<dataset>_<n_src>spk.{csv,md}``. Reproduce with::
 
     DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase1.py \\
-        --config configs/phase1_librimix_3spk_eval.yaml
+        --config configs/phase1/dod/phase1_librimix_3spk_eval.yaml
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ def _write_results(rows: list[dict], out_dir: Path, stem: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase1_librimix_3spk_eval.yaml")
+    parser.add_argument("--config", default="configs/phase1/dod/phase1_librimix_3spk_eval.yaml")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 

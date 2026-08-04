@@ -235,7 +235,7 @@ third run within 0.01 dB of passthrough; (b) the embedding-sensitivity probe
 (`scripts/probe_phase1_conditioning.py`) on that checkpoint showed the pathway ALIVE but not
 steering (outputs change ~5% when swapping embeddings; SI-SDR vs `x_O` = 35.8 dB ≈ scaled
 mixture copy; diag−offdiag margin 0.16 dB ≈ 0); (c) the overfit-4-scenes run
-(`configs/phase1_overfit4_diag.yaml`, lr 3e-4, 600 single-batch epochs) sat at the passthrough
+(`configs/phase1/experiments/phase1_overfit4_diag.yaml`, lr 3e-4, 600 single-batch epochs) sat at the passthrough
 plateau for ~170 steps, then **escaped**: final loss ~−2 to −3, and the probe on its checkpoint
 returned STEERS (outputs change 86% across embeddings, passthrough down to 8.1 dB, diag
 +2.38 dB vs offdiag −3.04 dB — pointing G at speaker j actively suppresses speaker i).
@@ -260,8 +260,8 @@ losses); Phase 2's depth stratification should locate where the big wins live; (
 systems are undertrained (2000 of ~34k Libri3Mix train-360 recipes; loss still descending at
 cutoff) so all numbers are lower bounds; (c) the 2-speaker WSJ0-2mix literature-bar check is
 deferred — no LDC license — substitute Libri2Mix if ever needed. Reproduce: train both systems
-with `configs/phase1_librimix_3spk_train.yaml` (`--system proposed|blind`), eval with
-`scripts/run_phase1.py --config configs/phase1_librimix_3spk_eval.yaml` (limit 150).
+with `configs/phase1/dod/phase1_librimix_3spk_train.yaml` (`--system proposed|blind`), eval with
+`scripts/run_phase1.py --config configs/phase1/dod/phase1_librimix_3spk_eval.yaml` (limit 150).
 
 ### ☐ Phase 2 — THE money experiment (validates: accumulation-free reconstruction)
 
@@ -351,13 +351,13 @@ next time.
 **Next step:** most likely worth training (or continuing training) `G` with `dataset.placement:
 scheduled` (or a chain+scheduled mix) so it gets real depth-3 exposure, before re-running the
 depth-stratified eval — that should sharpen the flat-vs-sloped contrast if the compressed-floor
-hypothesis above is right. Gate thresholds in `configs/phase2_librimix_3spk_eval.yaml`
+hypothesis above is right. Gate thresholds in `configs/phase2/experiments/phase2_librimix_3spk_eval.yaml`
 (`tau_margin`, `max_mean_variance`, `min_vad_coverage`, `max_artifact_score`) are still untuned
 defaults and haven't been revisited given the above.
 
 **Fine-tune attempt (2026-07-27): checkpoint recovered at epoch 25/30, not the full 30.**
 `scripts/train_phase1.py` gained an optional `train.init_checkpoint` key so a run can warm-start
-from an existing checkpoint's weights instead of random init; `configs/phase2_librimix_3spk_train_scheduled.yaml`
+from an existing checkpoint's weights instead of random init; `configs/phase2/experiments/phase2_librimix_3spk_train_scheduled.yaml`
 fine-tunes `checkpoints/phase1/proposed_librimix_3spk.pt` on `dataset.placement: scheduled` scenes
 (same 2000-scene/30-epoch scale as the original Phase 1 run, for comparability) to give `G` real
 depth-3 exposure. First attempt on Kaggle hit the platform's ~12h (43200s) max execution ceiling
@@ -366,7 +366,7 @@ and was SIGKILLed (exit 137) during epoch 30 -- the observed per-epoch cost (~14
 checkpoint at epoch 25 (`checkpoint_every: 5`, overwriting) survived in the canceled version's
 output and was used as-is (loss -2.95 there vs. -3.28 at epoch 29, so not far off where it was
 headed) rather than re-running with a lower epoch count. Evaluated via
-`configs/phase2_librimix_3spk_eval_finetuned.yaml` (`eval.tag: finetuned`, writes
+`configs/phase2/experiments/phase2_librimix_3spk_eval_finetuned.yaml` (`eval.tag: finetuned`, writes
 `results/phase2_librimix_3spk_finetuned.{csv,md}` alongside the original
 `results/phase2_librimix_3spk.{csv,md}` for a before/after comparison) -- see the next status note
 for what this produced, once it's run.
@@ -436,7 +436,7 @@ synthesizes 4/5-speaker LibriMix metadata by borrowing extra (speaker, utterance
 other rows of the existing `libri3mix_test.csv` (same LibriSpeech audio already on disk, no new
 corpus, deterministic given `--seed`) -- nothing in `dagger/data/mixing.py`, `reconstruct/`, `gate/`,
 or `refine/` is capped at 3 speakers (all key off `activity.shape[0]`), so this is purely a metadata
-exercise. `configs/phase2_librimix_4spk_eval.yaml` / `_5spk_eval.yaml` run the SAME scheduled-
+exercise. `configs/phase2/experiments/phase2_librimix_4spk_eval.yaml` / `_5spk_eval.yaml` run the SAME scheduled-
 placement fine-tuned checkpoint (`checkpoints/phase2/proposed_librimix_3spk_scheduled.pt`)
 zero-shot -- no retraining -- against these deeper scenes.
 
@@ -501,13 +501,13 @@ regardless of input scale, meaning `module(k*x, e) == k*module(x, e)` exactly up
 added as a mechanical unit test rather than a fuzzy check. Full suite green (202/202, no regressions);
 a synthetic 20-step training loop (forward/loss/backward/optimizer-step, alternating input amplitude
 >10x between steps to mimic the depth-3-vs-5 energy swing) stayed numerically stable throughout.
-Could not run the literal `configs/phase1_smoke.yaml` CPU check -- needs real LibriMix/LibriSpeech
+Could not run the literal `configs/phase1/experiments/phase1_smoke.yaml` CPU check -- needs real LibriMix/LibriSpeech
 audio under `DAGGER_DATA_ROOT`, which only exists on Kaggle, not the local dev machine -- the
 synthetic loop is the closest available substitute and is arguably a harsher check.
 
 This change invalidates every existing checkpoint (the input distribution `input_conv`/GroupNorm/FiLM
 adapted to shifts). Per the plan, no dedicated GPU run was spent re-validating this in isolation --
-the already-queued `configs/phase2_librimix_5spk_train_pilot.yaml` (warm-started from
+the already-queued `configs/phase2/experiments/phase2_librimix_5spk_train_pilot.yaml` (warm-started from
 `checkpoints/phase2/proposed_librimix_3spk_scheduled.pt`) was the vehicle for the first run against
 the new code.
 
@@ -516,7 +516,7 @@ widened -- reconfirms the 2026-07-29 finding via a different route, and points a
 single-depth fine-tuning.** Training ran clean (loss 4.80 -> 1.59 monotonically over 15 epochs; one
 gradient-norm spike to 4134 at epoch 13 was absorbed cleanly by `grad_clip: 10.0` with no loss
 disruption -- clipping working exactly as intended, not a sign to lower `lr`). Eval via
-`configs/phase2_librimix_4spk_eval_pilot.yaml` / `_5spk_eval_pilot.yaml` (150 test scenes each),
+`configs/phase2/experiments/phase2_librimix_4spk_eval_pilot.yaml` / `_5spk_eval_pilot.yaml` (150 test scenes each),
 compared against the pre-Stage-1 zero-shot numbers logged above:
 
 | system | depth 2 (old→new) | depth 3 (old→new) | depth 4 (old→new) | depth 5 (old→new) |
@@ -560,7 +560,7 @@ Verified with two new tests (`tests/phase2/test_train_phase1_curriculum.py`, `bu
 trains without error and its saved checkpoint records both depths; a single-dict config still trains
 and records exactly one depth (the backward-compatibility check). Full suite green (204/204).
 
-`configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml` is the first real run to try: `dataset:`
+`configs/phase2/experiments/phase2_librimix_curriculum_3_4_5_train_pilot.yaml` is the first real run to try: `dataset:`
 as a 3-entry list (n_src 3/4/5, `placement: scheduled`, ~130 scenes/depth, 15 epochs -- matching the
 existing single-depth pilot's total scene budget rather than multiplying it by 3, since this is an
 extrapolation from the n_src=3 timing anchor, not a measurement), warm-started from the depth-5 pilot
@@ -610,6 +610,141 @@ gap now widening correctly -- this pilot was sized as a cheap mechanism check (1
 epochs), not a quality-maximizing run. Next candidate: scale the curriculum run up (more scenes/
 epochs per depth, mirroring the 400→2000-scene jump that produced Phase 1's actual DoD-worthy
 numbers) now that the mechanism itself is validated as directionally correct.
+
+---
+
+#### What "curriculum training" means here (for anyone reading this repo cold)
+
+Not curriculum learning in the usual easy→hard-ordering sense. In this repo it means one training
+run whose batches are drawn from **several overlap depths at once** instead of a single fixed
+speaker count.
+
+Background: `G` is architecturally speaker-count-agnostic (nothing is sized to a number of
+concurrent speakers -- every module keys off `activity.shape[0]`), but a network trained only on
+3-speaker mixtures is *distributionally* specialized to them, and transfers poorly to 4 or 5. That
+is a known effect in the separation literature, and every run here before 2026-07-31 reproduced it.
+
+The implementation (`scripts/train_phase1.py`): `dataset:` in the config may be a single dict
+(one depth, the original behavior) **or a list** of per-depth entries. Each entry builds its own
+loader through the unmodified `build_dataset`; one shared model and optimizer then see batches
+interleaved from all loaders in a per-epoch-shuffled order. Every individual batch still comes from
+exactly one loader, so it is internally uniform in `num_speakers` and no custom collate or padding
+was needed. A single-entry list reduces to exactly the prior single-depth code path.
+
+Why it mattered: fixed-depth fine-tuning repeatedly raised the absolute floor while *narrowing* the
+accumulation-specific gap (2026-07-29, 2026-07-31), because it disproportionately helped whichever
+system started worst. Curriculum training was the first intervention to widen the gap instead --
+it makes `G` a sharper extractor for genuine clean-mixture input across a range of depths, and that
+sharpening does not transfer to the corrupted-residual input that deflation feeds it at inference.
+
+---
+
+**PHASE 2 CLOSE-OUT (2026-08-04): DoD met on the ordering + flat-vs-sloped criteria, with the axis
+corrected; one pending run to regenerate everything from a scratch-trained checkpoint.**
+
+*The axis correction -- the single most important lesson of this phase.* Five runs plotted against
+overlap depth read as "directionally supported, never clean." The reason: **depth is not the
+accumulation counter.** `reconstruct_all_deflation` deflates once per scene over all `m` speakers,
+so the error a speaker inherits is set by how many prior estimates were subtracted before it --
+not by how many voices happen to be concurrent in whichever region is later scored. Depth measures
+*intrinsic difficulty*, which hits all four systems equally and buries a between-system effect.
+Two variables were being summed into one column. The instrumentation added on 2026-08-02
+(`m`, `deflation_index`, `n_accepted_before` per row; gate decisions in a separate `_gate.csv` at
+their own grain) separates them, and the effect is immediate. No retraining was involved -- the
+quantity was always in the pipeline, merely never recorded.
+
+*Ordering.* `coarse_to_fine > gated_deflation > ungated_deflation` holds at every depth 2-5 across
+all three eval sets, without exception.
+
+*The two figures.*
+
+- **Primary -- `n_accepted_before` at the deepest depth, deflation systems only.** SI-SDR against
+  the number of prior estimates already subtracted into the residual: the exact index of Theorem
+  3's `L*||E_(m-1)||` penalty. Monotone at every `m`, with balanced n=150 per level (every speaker
+  participates in the peak-depth region by construction). At m=5, depth 5:
+  `-3.84 -> -6.67 -> -8.20 -> -8.94 -> -9.14`. The accumulation-free systems do not appear because
+  they take zero deflation steps -- for them the property is proven structurally (`refine/` never
+  imports `deflation`, never builds a residual, enforced by an `ast`-based test), not measured. A
+  measurement cannot demonstrate the absence of a mechanism better than the architecture does.
+  Generate at the DEEPEST depth: shallower depths have unbalanced n across levels (only some
+  speakers have samples there) and the curve wobbles for that reason alone.
+- **Secondary -- `m` sweep at fixed depth 2, all four systems.** Less direct but far more legible,
+  and it shows the same effect *between* scenes. `no_recursion` is flat (+0.16 dB from m=3 to m=5),
+  which is what licenses the cross-eval-set comparison at all; `ungated_deflation` falls 2.35 dB,
+  `gated_deflation` 1.66. Depth 2 specifically, because it is the only depth where the control is
+  genuinely flat and the figure needs no correction to be honest.
+
+*The accumulation decline is sub-linear, not linear* (m=5 steps: -2.83, -1.53, -0.74, -0.20).
+Theorem 2's `||E_m|| <= m*eps` is an upper bound and the measurement sits well under it. Report
+this before a reader computes `m*eps` and asks. An enrollment-order confound exists (deflation
+order is ascending `V_i`, so level 0 is always the best-enrolled speaker) and is bounded at
+**~0.45 dB against a 5.30 dB effect** -- under 10%, estimated from gated's level-0 population,
+which includes later-in-order speakers whose predecessors were all rejected.
+
+*Absolute SI-SDR is negative at depths 4-5 for every system, including `no_recursion`.* This is the
+extractor's operating point, not the reconstruction strategy: the curriculum checkpoint was
+650 scenes/depth x 15 epochs against Phase 1's 2000 x 30 at a single depth. Phase 2's claims are
+relative -- every comparison holds scenes, mixture, and checkpoint fixed and varies only the
+reconstruction strategy -- and the accumulation result replicated on **three independently
+constructed corpora whose absolute levels span 5 dB** (`no_recursion` at the deepest depth: -4.03,
+-0.23, +0.75). It is not an artifact of a weak checkpoint. Do NOT attribute the negative absolutes
+to refinement: `no_recursion` has none and is equally negative.
+
+*Refinement: a real bug, then an earned negative result.* `coarse_to_fine` sat below `no_recursion`
+at every depth. Cause found in `refine/coarse_to_fine.py`: the gate was called with
+`embedding_self=blended`, where `blended = 0.5*e_i + 0.5*raw` contains the very embedding being
+judged, so `identity_margin` computed `cos(theta/2)` instead of `cos(theta)` -- inflating every
+candidate, and inflating the *worst* ones most (at 90 degrees, 0.00 becomes 0.71). Signature: a
+98-99% accept rate that did not move with speaker count, while the identically-thresholded deflation
+gate tracked difficulty correctly (71.8 -> 61.2 -> 54.1% at m=3/4/5). Fixed by passing
+`embeddings[i]`; accept rate became 60.2/49.3/39.1% and the deficit roughly halved. The residual
+deficit is real, and refinement was then tested in three regimes, all with clean (oracle)
+enrollment:
+
+| regime | result |
+|---|---|
+| stock, 1 s enrollment | -0.2 to -1.1 dB |
+| starved, 150-800 ms (`enroll.budget_ms`) | deficit shrinks, but only via gate shutdown (94% ties) -- **degenerate, not evidence** |
+| heterogeneous, 4 s (solo from utterance A, overlap from B) | **-0.36 / -0.69 dB with the gate healthy at 59.6%** |
+
+The heterogeneous arm is the decisive one: enrollment stayed long and clean so extraction quality
+held and the gate stayed open, and refinement still lost (122 losses against 72 wins at depth 2,
+ties only 35%). Its matched control (`same-chapter` pairing, identical geometry) came in at
+-0.77 / -0.83, so heterogeneity helped by 0.14-0.41 dB -- directionally consistent with the
+mechanism, but ~1.5 sigma across two different scene sets, so not established. **Conclusion:
+refinement is net-harmful when enrollment is correct, and is reported as an optional stage, off by
+default (`refine.rounds: 0` makes `coarse_to_fine` bit-identical to `no_recursion`).** The one
+untested regime is *contaminated* enrollment, where the baseline is actually broken -- that is
+Phase 3, and it is why `V_i` exists and has never once fired. Also untested: a variance-weighted
+blend instead of the fixed `0.5/0.5`, which would down-weight a noisy candidate automatically and
+needs no benefit test. A negative result on one update rule is not one on the family.
+
+*New finding -- the confidence gate is not an accumulation detector.* On the heterogeneous corpus
+(4 s enrollment) `gated_deflation` accepted **98.4%** and collapsed onto `ungated_deflation`
+(-4.11 vs -4.13 at depth 3); the control, also 4 s, gave 97.6%. With a good reference embedding,
+residual-corrupted estimates still score high margins -- `M_i` detects **wrong-speaker**, not
+**degraded-same-speaker**. Its rejections in the stock runs were driven substantially by enrollment
+noise keeping margins near `tau_margin`, not by recognizing residual damage. Consistent with the
+earlier decomposition that **80-96% of gated's advantage was a shift in the accumulation
+distribution**, not better estimates. Do not present "gated beats ungated" as a robust property:
+it holds only when the gate actually rejects, which depends on the operating point.
+
+*Gate threshold tuning stays deferred to Phase 3* (`scripts/tune_gate.py`,
+`configs/phase2/experiments/phase2_gate_tune_dev.yaml`, and the `offset` dataset key exist and are tested). Three of
+the four thresholds behave sensibly at their defaults, and the fourth cannot be tuned at all today:
+`schedule_solo_then_overlap` gives one solo run, `select_topk_solo_clips` returns one clip, and
+`var` across one clip is identically 0, so `V_i` is structurally dead until real diarization
+supplies multiple segments of differing quality. Tuning must happen on the dev split (`offset:
+650`), never on test -- and note `gate_cfg` is shared, so raising `tau_margin` also tightens
+`gated_deflation` toward `no_recursion`, the degenerate direction.
+
+*Pending:* one scratch-trained curriculum run at larger scale
+(`configs/phase2/dod/phase2_librimix_curriculum_3_4_5_train_scratch.yaml`, no `init_checkpoint`, so the
+reported checkpoint comes from one command rather than a chain of prior fine-tunes), then re-run
+the three evals and generate both figures. Expect absolute quality similar to or slightly below the
+warm-started checkpoint at equal compute -- that is the price of reproducibility, and it does not
+affect the relative claims. Figure generation needs **no GPU**: `plot_phase2_depth.py` and
+`aggregate_phase2.py` are CPU-only and read the existing CSVs.
 
 ### ☐ Phase 3 — Real diarization + robustness
 
@@ -677,7 +812,19 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-07-31 — Depth-agnostic extractor investigation, Stage 2 decision-gate result:
+*Last updated: 2026-08-04 — PHASE 2 CLOSE-OUT (see the close-out block at the end of §5 Phase 2).
+The DoD's ordering and flat-vs-sloped criteria are met, but on the ACCUMULATION axis
+(`n_accepted_before` / `m`), not the depth axis — depth measures intrinsic difficulty, which hits
+all four systems equally and buried the effect for five runs. Ordering holds at every depth 2-5
+across three eval sets; accumulation is monotone with balanced n and replicates on three corpora
+spanning 5 dB of absolute quality. Two bugs found and fixed: `±inf` silently dropped from means
+(2026-07-26), and a self-referential margin that let the refinement gate accept 98-99% regardless
+of candidate quality (2026-08-03). Refinement is now a measured negative under clean enrollment
+across three regimes and is reported as optional/off-by-default; the confidence gate was shown NOT
+to be an accumulation detector (`M_i` catches wrong-speaker, not degraded-same-speaker), so
+`gated_deflation`'s middle position is regime-dependent rather than robust. Pending: one
+scratch-trained curriculum run at larger scale, then re-run the evals and generate both figures
+(figures need no GPU). Previously: 2026-07-31 — Depth-agnostic extractor investigation, Stage 2 decision-gate result:
 the curriculum checkpoint (trained on a mix of n_src 3/4/5 in one run) is the first intervention in
 this whole investigation to *widen* the accumulation-specific gap rather than narrow it -- six of
 seven depth-comparisons widened (+0.5 to +1.2 dB) against the single-depth-5 pilot, one flat, zero

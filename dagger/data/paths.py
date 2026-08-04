@@ -5,7 +5,7 @@ Two inputs, cleanly separated:
 * **`.env`** populates the *environment* — the corpus location
   (``DAGGER_DATA_ROOT``, a mounted-volume path) and any gated-corpus credential
   (``DAGGER_WSJ0_ACCESS_KEY``). Loaded once via :func:`load_env`.
-* **`configs/phase0*.yaml`** holds the literal dataset *fields* (name, metadata
+* **`configs/phase0/dod/*.yaml`** holds the literal dataset *fields* (name, metadata
   path, split, n_src, limit), read by exact key.
 
 Corpus audio never lives in the repo, so nothing here is committed.

@@ -43,7 +43,7 @@ another's results):
 Reproduce with::
 
     DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase2.py \\
-        --config configs/phase2_librimix_3spk_eval.yaml
+        --config configs/phase2/experiments/phase2_librimix_3spk_eval.yaml
 """
 
 from __future__ import annotations
@@ -534,7 +534,7 @@ def _write_results(rows: list[dict], gate_rows: list[dict], out_dir: Path, stem:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase2_librimix_3spk_eval.yaml")
+    parser.add_argument("--config", default="configs/phase2/experiments/phase2_librimix_3spk_eval.yaml")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 

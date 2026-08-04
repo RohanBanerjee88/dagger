@@ -1,4 +1,4 @@
-# Same as configs/phase2_librimix_3spk_eval.yaml, pointed at the fine-tuned
+# Same as configs/phase2/experiments/phase2_librimix_3spk_eval.yaml, pointed at the fine-tuned
 # (scheduled-placement-exposed) checkpoint instead of the original Phase 1 one.
 # Kept as a separate config/results file (not overwriting the original) so the
 # before/after comparison survives: results/phase2_librimix_3spk.{csv,md} is

@@ -3,7 +3,7 @@
 
 Runs the whole plumbing path with *oracle* diarization and the null extractor
 (no learning yet) over a handful of real mixtures. A dataset loader
-(``configs/phase0_*.yaml`` -> LibriMix / WSJ0-2mix) mixes source utterances on
+(``configs/phase0/dod/*.yaml`` -> LibriMix / WSJ0-2mix) mixes source utterances on
 the fly (storage-lean — only the sources live on the mounted volume), derives
 ground-truth activity/solo/overlap regions, reconstructs each speaker by copying
 solo regions (overlap left empty until Phase 1), and reports SI-SDR overall and
@@ -13,7 +13,7 @@ Phase 0 definition of done (CLAUDE.md §5): solo regions score essentially
 perfectly. Overlap regions score poorly here *by design* — there is no extractor
 yet. Reproduce with::
 
-    DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase0.py --config configs/phase0_librimix.yaml
+    DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase0.py --config configs/phase0/dod/phase0_librimix.yaml
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def score_scene(scene: Scene, fade: int) -> list[tuple[str, float, float, float]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase0_librimix.yaml")
+    parser.add_argument("--config", default="configs/phase0/dod/phase0_librimix.yaml")
     args = parser.parse_args()
 
     load_env()  # populate DAGGER_DATA_ROOT / credentials from .env if present

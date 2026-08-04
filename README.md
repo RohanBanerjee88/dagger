@@ -82,8 +82,8 @@ volume (see below):
 ```bash
 pip install -e '.[data]'    # soundfile + scipy + python-dotenv
 cp .env.example .env        # set DAGGER_DATA_ROOT (and, for WSJ0, its access key)
-python scripts/run_phase0.py --config configs/phase0_librimix.yaml
-python scripts/run_phase0.py --config configs/phase0_wsj0mix.yaml
+python scripts/run_phase0.py --config configs/phase0/dod/phase0_librimix.yaml
+python scripts/run_phase0.py --config configs/phase0/dod/phase0_wsj0mix.yaml
 ```
 
 The run reports SI-SDR split by region: solo interiors are recovered bit-exactly
@@ -114,15 +114,15 @@ extractor `G`.
 
 ```bash
 pip install -e '.[data,ml]'
-python scripts/run_phase1.py --config configs/phase1_librimix_3spk_eval.yaml
+python scripts/run_phase1.py --config configs/phase1/dod/phase1_librimix_3spk_eval.yaml
 ```
 
 This requires the trained checkpoint at `checkpoints/phase1/proposed_librimix_3spk.pt`
 (see [Pretrained weights](#pretrained-weights)), or retrain it yourself:
 
 ```bash
-python scripts/train_phase1.py --config configs/phase1_librimix_3spk_train.yaml --system proposed
-python scripts/train_phase1.py --config configs/phase1_librimix_3spk_train.yaml --system blind
+python scripts/train_phase1.py --config configs/phase1/dod/phase1_librimix_3spk_train.yaml --system proposed
+python scripts/train_phase1.py --config configs/phase1/dod/phase1_librimix_3spk_train.yaml --system blind
 ```
 
 ### Phase 2 — depth-stratified accumulation-free vs. deflation (3-speaker LibriMix, oracle diarization)
@@ -142,7 +142,7 @@ theoretically-predicted ordering (`results/phase2_librimix_3spk_finetuned.csv`).
 
 ```bash
 pip install -e '.[data,ml]'
-python scripts/run_phase2.py --config configs/phase2_librimix_3spk_eval_finetuned.yaml
+python scripts/run_phase2.py --config configs/phase2/experiments/phase2_librimix_3spk_eval_finetuned.yaml
 ```
 
 ### Pretrained weights
@@ -155,8 +155,8 @@ attribution.
 
 | Checkpoint | HF repo | Used by |
 |---|---|---|
-| Phase 1 "proposed" extractor | [`AdityaAA2004/dagger-phase1-proposed-librimix-3spk`](https://huggingface.co/AdityaAA2004/dagger-phase1-proposed-librimix-3spk) | `configs/phase1_librimix_3spk_eval.yaml`, `configs/phase2_librimix_3spk_eval.yaml` |
-| Phase 2 fine-tuned extractor | [`AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned`](https://huggingface.co/AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned) | `configs/phase2_librimix_3spk_eval_finetuned.yaml` |
+| Phase 1 "proposed" extractor | [`AdityaAA2004/dagger-phase1-proposed-librimix-3spk`](https://huggingface.co/AdityaAA2004/dagger-phase1-proposed-librimix-3spk) | `configs/phase1/dod/phase1_librimix_3spk_eval.yaml`, `configs/phase2/experiments/phase2_librimix_3spk_eval.yaml` |
+| Phase 2 fine-tuned extractor | [`AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned`](https://huggingface.co/AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned) | `configs/phase2/experiments/phase2_librimix_3spk_eval_finetuned.yaml` |
 
 Fetch and cache either checkpoint locally with:
 

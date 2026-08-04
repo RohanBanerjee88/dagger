@@ -22,7 +22,7 @@ Interpretation (printed at the end):
 Reproduce with::
 
     DAGGER_DATA_ROOT=/kaggle/working/data python scripts/probe_phase1_conditioning.py \\
-        --config configs/phase1_librimix_3spk_eval.yaml --scenes 5
+        --config configs/phase1/dod/phase1_librimix_3spk_eval.yaml --scenes 5
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def _rel_diff(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase1_librimix_3spk_eval.yaml")
+    parser.add_argument("--config", default="configs/phase1/dod/phase1_librimix_3spk_eval.yaml")
     parser.add_argument("--checkpoint", default=None, help="override the config's checkpoint path")
     parser.add_argument("--scenes", type=int, default=5, help="probe-able scenes to use")
     parser.add_argument("--device", default=None)

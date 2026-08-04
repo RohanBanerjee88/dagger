@@ -45,7 +45,7 @@ config with one full ``scripts/run_phase2.py`` run rather than trusting the
 sweep for those.
 
     DAGGER_DATA_ROOT=/kaggle/working/data python scripts/tune_gate.py \\
-        --config configs/phase2_gate_tune_dev.yaml
+        --config configs/phase2/experiments/phase2_gate_tune_dev.yaml
 """
 
 from __future__ import annotations
@@ -354,7 +354,7 @@ def _write(rows: list[dict], lines: list[str], out_dir: Path, stem: str) -> None
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase2_gate_tune_dev.yaml")
+    parser.add_argument("--config", default="configs/phase2/experiments/phase2_gate_tune_dev.yaml")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 

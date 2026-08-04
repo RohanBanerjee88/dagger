@@ -21,7 +21,7 @@
 # intrinsic criterion instead, then frozen and applied unchanged everywhere.
 #
 #   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/tune_gate.py \
-#       --config configs/phase2_gate_tune_dev.yaml
+#       --config configs/phase2/experiments/phase2_gate_tune_dev.yaml
 
 sample_rate: 8000
 fade_ms: 5

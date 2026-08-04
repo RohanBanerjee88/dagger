@@ -1,5 +1,5 @@
 # Scaled-up curriculum run: 650 scenes/depth (1950 total) -- exactly 5x
-# configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml's 130/depth, mirroring
+# configs/phase2/experiments/phase2_librimix_curriculum_3_4_5_train_pilot.yaml's 130/depth, mirroring
 # the same 5x jump (400 -> 2000 scenes) that took Phase 1 from an inconclusive
 # pilot to its actual DoD-worthy result. Same epoch count (15) and all other
 # hyperparameters as the pilot -- only the scene count changes, so any

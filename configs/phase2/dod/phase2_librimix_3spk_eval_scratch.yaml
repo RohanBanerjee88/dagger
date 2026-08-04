@@ -1,6 +1,7 @@
-# Sanity-check scale (5 scenes) for the fine-tuned checkpoint, mirroring
-# configs/phase2_librimix_3spk_smoke.yaml -- run this before the full
-# 150-scene configs/phase2_librimix_3spk_eval_finetuned.yaml.
+# Eval against the SCRATCH-trained curriculum checkpoint
+# (configs/phase2/dod/phase2_librimix_curriculum_3_4_5_train_scratch.yaml -- no warm start,
+# so this checkpoint is reproducible from one command).
+# Writes results/phase2_librimix_3spk_scratch345.{csv,md} + _gate.csv.
 
 sample_rate: 8000
 fade_ms: 5
@@ -11,7 +12,7 @@ dataset:
   n_src: 3
   placement: scheduled
   min_solo_ms: 1000.0
-  limit: 5
+  limit: 150
 
 enroll:
   k: 3
@@ -25,8 +26,7 @@ extractor:
   n_heads: 4
   n_tokens: 8
   cross_attn_blocks: 6
-  num_speakers: 3
-  checkpoint: checkpoints/phase2/proposed_librimix_3spk_scheduled.pt
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch.pt
 
 gate:
   tau_margin: 0.1
@@ -39,4 +39,4 @@ refine:
 
 eval:
   results_dir: results
-  tag: finetuned_smoke
+  tag: scratch345   # writes results/phase2_librimix_3spk_scratch345.{csv,md}

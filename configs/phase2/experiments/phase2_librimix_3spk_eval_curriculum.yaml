@@ -1,5 +1,5 @@
 # Same as phase2_librimix_3spk_eval_finetuned.yaml but pointed at the Stage 2
-# curriculum-trained checkpoint (configs/phase2_librimix_curriculum_3_4_5_train_pilot.yaml)
+# curriculum-trained checkpoint (configs/phase2/experiments/phase2_librimix_curriculum_3_4_5_train_pilot.yaml)
 # instead of the single-depth-3 checkpoint. Run alongside the _4spk/_5spk
 # variants of this config for the full depth-stratified comparison. Writes
 # results/phase2_librimix_3spk_curriculum345.{csv,md}.

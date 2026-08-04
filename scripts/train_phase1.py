@@ -40,7 +40,7 @@ not a special case.
 Reproduce with::
 
     DAGGER_DATA_ROOT=/mnt/data python scripts/train_phase1.py \\
-        --config configs/phase1_smoke.yaml --system proposed
+        --config configs/phase1/experiments/phase1_smoke.yaml --system proposed
 """
 
 from __future__ import annotations
@@ -315,7 +315,7 @@ def train_blind(cfg: dict, device: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/phase1_smoke.yaml")
+    parser.add_argument("--config", default="configs/phase1/experiments/phase1_smoke.yaml")
     parser.add_argument("--system", choices=["proposed", "blind"], default=None)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()

@@ -1,5 +1,5 @@
 # Sanity-check scale (5 scenes) for the scaled-up curriculum checkpoint,
-# mirroring configs/phase2_librimix_3spk_smoke_finetuned.yaml.
+# mirroring configs/phase2/experiments/phase2_librimix_3spk_smoke_finetuned.yaml.
 #
 # Run this FIRST in any session that will run the three 150-scene
 # configs/phase2_librimix_{3,4,5}spk_eval_curriculum_full.yaml evals: it takes
