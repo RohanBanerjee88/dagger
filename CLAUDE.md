@@ -746,6 +746,146 @@ warm-started checkpoint at equal compute -- that is the price of reproducibility
 affect the relative claims. Figure generation needs **no GPU**: `plot_phase2_depth.py` and
 `aggregate_phase2.py` are CPU-only and read the existing CSVs.
 
+---
+
+**SCRATCH-TRAINED DoD RUN (2026-08-09): provenance is clean and the ordering claim fully
+replicates, but the accumulation MAGNITUDE weakened ~3x -- traced to a gradient-clipping defect
+that only bites when training from random init. One re-run pending; report the checkpoint-robust
+claims now, hold the magnitude.**
+
+The run above was executed. `configs/phase2/dod/phase2_librimix_curriculum_3_4_5_train_scratch.yaml`
+completed **all 10/10 epochs** (loss 4.69 -> 1.67, monotone) and the reported checkpoint is the
+epoch-10 save, not an interrupted `checkpoint_every: 2` save; no committed config was edited at
+runtime. Wall clock 18:27 -> 00:58 = **6h31m** training against the config's 7h32m budget, plus
+~2.2h of evals -- ~8.7h of the ~12h ceiling, so **~3.3h of headroom went unused** (room for ~5 more
+epochs). Evals: `configs/phase2/dod/phase2_librimix_{3,4,5}spk_eval_scratch.yaml`, 150 test scenes
+each, tag `scratch345`, results in `results/phase2/dod/`. The §7 "one command regenerates this"
+requirement is therefore **met** for the first time in Phase 2.
+
+#### Report these -- they are checkpoint-robust and this run is their strongest evidence
+
+1. **Ordering: 9 of 9, no exceptions.** `coarse_to_fine > gated_deflation > ungated_deflation` at
+   every depth 2-5 across all three eval sets. This now holds on a checkpoint built from random
+   init by a single command, in addition to every warm-started checkpoint before it. This is the
+   DoD's primary criterion and it is met.
+2. **Refinement is net-harmful under clean enrollment -- replicated.** `coarse_to_fine -
+   no_recursion` is negative at all 9 slices (-0.15 to -0.54 dB), losses ~2x wins, with the gate
+   *healthy*: accept rate 49.3 / 36.3 / 26.1% at m=3/4/5, tracking difficulty downward. No sign of
+   the degenerate 94%-tie gate shutdown seen in the starved-enrollment arm, so this is an earned
+   negative, not an artifact. Confirms `refine.rounds: 0` as the default.
+3. **`V_i` is confirmed structurally dead.** Zero variance rejections in 5,400 gate decisions;
+   `mean_variance` is *exactly* 0.0 in 69-82% of them and <= 2e-4 otherwise, against a 0.05
+   threshold. Exactly as predicted -- it stays a Phase 3 item and cannot be tuned until real
+   diarization supplies multiple enrollment segments of differing quality.
+
+#### The accumulation magnitude weakened, and the terminal step is a new finding
+
+Primary quantity (`ungated_deflation`, `n_accepted_before`, m=5 at depth 5, n=150 per level --
+balanced by construction):
+
+| checkpoint | lvl 0 | lvl 1 | lvl 2 | lvl 3 | lvl 4 | total |
+|---|---|---|---|---|---|---|
+| warm-started (2026-08-04) | -3.84 | -6.67 | -8.20 | -8.94 | -9.14 | **-5.30 dB**, monotone |
+| scratch (this run) | -4.89 | -5.93 | -6.35 | -6.98 | -6.72 | **-1.83 dB**, upticks at the end |
+
+Paired within-scene, the *total* 0->4 decline is solid (**t = -4.5**), but per-step only 0->1 is
+individually significant (t = -2.2) and the final step is **+0.26 dB (t = +0.8)**.
+
+**The terminal uptick is not noise -- it replicates on all three corpora** (3spk last step -0.07,
+t=-0.2; 4spk +0.12, t=+0.3; 5spk +0.26, t=+0.8). There is a mechanism, and it should be *stated*
+in the paper rather than left for a reader to find: the last deflation step is the **one-and-rest
+endpoint**. Its residual is `x_O` minus *every* other estimate, which already approximates that
+speaker's own source, so `G` has an unusually easy job. Theorem 2's `||E_m|| <= m*eps` is an upper
+bound and the terminal step is a benign special case of it -- accumulation is monotone through the
+*body* of the chain and flattens at the endpoint. Both figures encode this by drawing the final
+segment **dashed**.
+
+**The enrollment-order confound is now negligible and points the conservative way.** Re-estimated
+by the same technique as 2026-08-04 (gated's `n_accepted_before == 0` population split by
+`deflation_index`): **+0.07 dB at 5spk** (vs ~0.45 dB before) and **-1.05 dB at 3spk** -- negative
+meaning later-in-order speakers score *better*, which would understate the measured decline. So the
+shrinkage is real, not a confound artifact.
+
+#### Root cause of the weakening: `grad_clip` saturated into a hidden LR schedule
+
+| epoch | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| median grad norm | 1.10 | 3.70 | 6.86 | 7.86 | 8.99 | 11.12 | 12.93 | 14.15 | 14.76 | **15.14** |
+| clipped % | 4 | 11 | 20 | 27 | 37 | 61 | 76 | 86 | 92 | **93** |
+| loss | 4.69 | 4.25 | 3.71 | 3.27 | 2.95 | 2.64 | 2.26 | 1.94 | 1.74 | 1.67 |
+
+`_grad_norm_summary`'s own docstring (`scripts/train_phase1.py`) states the rule this violates:
+"a median at/above the clip means every step is being rescaled -- i.e. the clip is acting as a
+hidden LR reduction -- so raise it." The median crossed `grad_clip: 10.0` at epoch 6 and ended at
+1.5x it; the last four epochs were effectively normalized-gradient descent at a shrinking step
+size. **The loss "converging" is confounded with exactly that** -- per-epoch improvement decays
+-0.31 / -0.20 / -0.07 at epochs 8/9/10, precisely where the clip rate hits 86/92/93%. From this
+log, "converged" and "throttled" are indistinguishable.
+
+*Why it bit here and never before:* `si_sdr_loss` has gradient magnitude that **grows** as the
+estimate approaches the target (error energy sits in the denominator), so a fixed clip threshold
+becomes progressively more binding the better the model gets -- it is self-limiting by
+construction. `grad_clip: 10.0` was inherited from Phase 1, where clipping was rare spike
+protection (2026-07-12). The warm-start chain never traversed the high-gradient region from random
+init, so it never tripped this. **Training from scratch is the specific thing that exposed it.**
+Genuine spikes do still occur (max 1520 / 2183 / 896), so clipping is still needed -- just not at a
+threshold that catches 93% of ordinary steps.
+
+Consistent with this, absolute quality came in **below** the config's "similar or slightly below"
+prediction -- `no_recursion` at each set's deepest depth: 3spk -1.19 (was +0.75), 4spk -3.35 (was
+-0.23), 5spk -4.76 (was -4.03), i.e. 0.7-3.1 dB worse.
+
+**The honest cross-checkpoint statement, and it belongs in the paper:** the *ordering* is robust --
+it has held on every checkpoint ever trained here. The accumulation *magnitude* is not: it varies
+~3x (5.30 vs 1.83 dB) between two checkpoints trained on the same curriculum recipe differing only
+in warm-start. Claim the ordering; report the magnitude as a range with the checkpoint named.
+
+*Re-run queued:* same config, `grad_clip` raised (~50, or a running-percentile clip, which is the
+principled fix given the SI-SDR gradient growth), optionally `epochs: 13` to spend the idle 3.3h.
+That settles whether the 3x shrinkage is a checkpoint artifact or a property of the measurement.
+Either outcome is publishable; only the unexplained version is not.
+
+#### Corrected figures (regenerated 2026-08-09, CPU-only)
+
+Both live in `results/phase2/dod/`. The 2026-08-04 originals
+(`fig1_accumulation_within_scene.png`, `fig2_accumulation_across_scenes.png`) are **superseded** --
+regenerating them from `scratch345` exposed two reporting defects, both now fixed:
+
+- **`fig1_accumulation_within_scene_corrected.png`** -- two panels. **A**: the headline slice
+  (m=5, depth 5), both deflation systems, +-1 SEM error bars. **B**: the same curve on all three
+  corpora, plotted as change from level 0 so the panels are directly comparable, showing the
+  monotone body and the terminal flattening replicating three times.
+  *Defect fixed:* the original plotted `gated_deflation`'s level-4 point (**n=3**, SEM 2.68) as a
+  dramatic plunge to -8.89 -- the figure's most visually striking feature was its least reliable
+  point, and it stretched the y-range enough to compress the real signal. Levels with n < 25 are
+  now omitted from the canvas and named on the plot, with their means in the tables above.
+- **`fig2_accumulation_vs_control_corrected.png`** -- paired SI-SDR vs `no_recursion` at fixed
+  depth 2, swept over m, all three test systems.
+  *Defect fixed:* the original m-sweep was licensed by `no_recursion` being flat at depth 2
+  (+0.16 dB on the warm-started checkpoint). On this checkpoint the control slopes **-0.95 dB**,
+  nearly as steeply as two of the three test systems, so the original figure was four near-parallel
+  declining lines -- visually "everything degrades with m," exactly the depth/accumulation
+  conflation the axis correction existed to eliminate. Replacing mean-subtraction with **paired
+  differencing per (scene, speaker, depth)** removes between-corpus difficulty *exactly*, putting
+  the control at 0 by construction. The figure now also shows the ordering as vertical separation
+  at every m, so it carries both claims:
+
+  | system (paired vs control, depth 2) | m=3 | m=4 | m=5 |
+  |---|---|---|---|
+  | `ungated_deflation` | -1.85 +-0.17 | -2.62 +-0.23 | -2.59 +-0.26 |
+  | `gated_deflation` | -1.16 +-0.14 | -1.29 +-0.16 | -1.31 +-0.18 |
+  | `coarse_to_fine` | -0.42 +-0.11 | -0.51 +-0.11 | -0.54 +-0.12 |
+
+  Read: ungated's penalty deepens 3->4 (~2.7 sigma) then saturates; gated's and coarse_to_fine's
+  are flat. `coarse_to_fine`'s constant ~-0.5 dB is the refinement deficit, not accumulation.
+
+**Reproducibility gap -- `plot_phase2_depth.py` cannot yet produce these** (§7 violation until
+fixed). The corrected figures were generated by an out-of-tree script. Two flags are needed:
+`--min-n N` (drop levels below N from the canvas, annotate them) and `--paired-vs-control`
+(pair on `(scene, speaker, depth)` against `no_recursion` instead of plotting raw means), plus
+dashing the terminal `n_accepted_before == m-1` segment. Land these before the re-run so the final
+figures come from a committed command.
+
 ### ☐ Phase 3 — Real diarization + robustness
 
 **Goal:** survive imperfect, real diarization.
@@ -783,7 +923,10 @@ for the proposed system.
 2. **Oracle diarization first, always.** Never report a real-diarization number without the
    oracle number beside it — otherwise you can't tell if a failure is the diarizer, `φ`, or `G`.
 3. **Eval encoder ≠ training encoder.** Non-negotiable for speaker metrics.
-4. **Stratify by overlap depth.** That's the evidence, not aggregate averages.
+4. **Stratify — and on the right axis.** Never report an aggregate average. But note (2026-08-04)
+   that **overlap depth is the intrinsic-difficulty axis, not the evidence axis**: it hits all four
+   systems equally and buried the accumulation effect for five runs. The headline axis is
+   **accumulation** (`m` / `n_accepted_before`). Report both; claim on accumulation.
 5. **Keep the noise term in the recon loss** (or train noise-free). Don't let the losses fight.
 6. **One phase at a time.** Green "definition of done" before proceeding.
 7. **Add a unit test that fails if any output tensor was produced from a residual.** Cheap
@@ -800,6 +943,26 @@ for the proposed system.
   No numbers that can't be regenerated by one command.
 - **Sample rate:** dev at 8 kHz (fast) on WSJ0/LibriMix; 16 kHz for real corpora + Whisper.
 - **Commit discipline:** small commits per module; tests green before merge.
+- **Statistical reporting.** Four idioms drifted in undefined (`std`, `p5/p95`, `sigma`, `SEM`);
+  they are not interchangeable, and this is the committed definition of which to use when.
+  Full one-line glossary in `docs/research-glossary.md` § "Statistics & reporting" — but that file
+  is **gitignored personal notes**, so anything the paper depends on lives here.
+  - **Always carry `n`** beside a mean. Phase 2's first fig1 drew an **n=3** point as its headline
+    trend; nothing on the chart said so.
+  - **`sd`** = spread of individual scenes (describes the data). **`SEM` = `sd/√n`** = precision of
+    the *mean* (shrinks with more data). At n=150, sd 3.9 dB → SEM 0.32 dB, ~12× tighter.
+  - **`p5/p95` band** answers "how consistent?"; **SEM** answers "how well do we know the average?"
+    They differ by ~30× on this data. **Never plot both unlabeled** — a reader assumes the smaller
+    one is the error bar. (This is the trap in the Phase 2 close-out's open min/max-band TODO:
+    that TODO is about spread; the figure error bars are about precision. Both belong; label them.)
+  - **Prefer paired differences** on matched `(scene, speaker, depth)` rows over subtracting two
+    means — pairing cancels scene difficulty *exactly* instead of hoping it averages out. This is
+    what rescued Phase 2's fig2 when the `no_recursion` control stopped being flat.
+  - **Report the win rate beside the mean.** A positive mean at a ~50% win rate is a few large
+    wins, not broad superiority — that was literally Phase 1's result.
+  - **`|t| ≳ 2`** as a reading heuristic for "unlikely to be chance." Effect size and significance
+    are separate questions and both get reported: Phase 2's accumulation decline is solidly
+    non-chance (`t = −4.5`) *and* 3× smaller than the prior checkpoint's.
 
 ---
 
@@ -809,10 +972,31 @@ for the proposed system.
 - **Is this change safe?** → re-check §1 and §2. If it touches the audio path or the loss,
   be extra careful.
 - **Numbers look too good?** → suspect ground-truth leakage or metric-encoder reuse first.
+- **What does this term mean?** → `docs/research-glossary.md` (jargon, one line each, with code
+  pointers) and `docs/research-practices.md` (*why* research works this way). Both are gitignored
+  personal notes — convenience, not source of truth. Anything a claim rests on belongs in this
+  file: the statistical reporting rules are §7, the settled maths is §2.
 
 ---
 
-*Last updated: 2026-08-04 — PHASE 2 CLOSE-OUT (see the close-out block at the end of §5 Phase 2).
+*Last updated: 2026-08-09 — SCRATCH-TRAINED DoD RUN evaluated (see the block at the end of §5
+Phase 2). Provenance is clean for the first time: the curriculum config ran 10/10 epochs from
+random init, the reported checkpoint is the epoch-10 save, no config was edited at runtime, so §7's
+"one command regenerates this" is met. **Ordering holds 9 of 9** (every depth 2-5 across all three
+eval sets) — the DoD's primary criterion, now replicated on a from-scratch checkpoint. The
+refinement negative result and `V_i` being structurally dead both replicated too (gate healthy at
+49.3/36.3/26.1% accept by m; zero variance rejections in 5,400 decisions). BUT the accumulation
+magnitude fell ~3x (5.30 → 1.83 dB at m=5/depth 5), traced to `grad_clip: 10.0` saturating —
+93% of steps clipped by epoch 10, median gradient norm 1.5x the threshold, so the last four epochs
+were a hidden LR reduction; `si_sdr_loss` gradients *grow* as the model improves, so a fixed clip
+is self-limiting, and warm-started runs never traversed that region. Report the ordering; hold the
+magnitude until the re-run with a raised clip. New finding worth keeping: the terminal deflation
+step is the **one-and-rest endpoint** (its residual approximates the speaker's own source), so
+accumulation is monotone through the body of the chain and flattens at the end — replicated on all
+three corpora, and drawn dashed in both figures. Both figures were regenerated and two reporting
+defects fixed: an n=3 point dominating fig1, and fig2's m-sweep having lost its flat control
+(replaced with exact paired differencing). `plot_phase2_depth.py` still needs `--min-n` and
+`--paired-vs-control` to regenerate them from a committed command. Previously: 2026-08-04 — PHASE 2 CLOSE-OUT (see the close-out block at the end of §5 Phase 2).
 The DoD's ordering and flat-vs-sloped criteria are met, but on the ACCUMULATION axis
 (`n_accepted_before` / `m`), not the depth axis — depth measures intrinsic difficulty, which hits
 all four systems equally and buried the effect for five runs. Ordering holds at every depth 2-5
