@@ -32,19 +32,18 @@ subtraction the reader should be able to check, not one to take on trust.
 from __future__ import annotations
 
 import argparse
-import csv
-import math
 from pathlib import Path
 
 import numpy as np
 
-SYSTEMS = ("no_recursion", "ungated_deflation", "gated_deflation", "coarse_to_fine")
-CONTROL_SYSTEM = "no_recursion"
+from dagger.metrics import phase2_scores
 
-# Matches scripts/run_phase2.py's SI_SDR_CAP_DB -- si_sdr() legitimately returns
-# +-inf (perfect / totally failed estimate), which is informative and gets
-# clipped; only nan ("speaker not active here") is dropped.
-SI_SDR_CAP_DB = 50.0
+# Reading, clipping and the +-inf rule are shared with scripts/run_phase2.py and
+# scripts/plot_phase2_depth.py -- see dagger.metrics.phase2_scores on why these
+# are no longer three separate copies.
+SYSTEMS = phase2_scores.SYSTEMS
+CONTROL_SYSTEM = phase2_scores.CONTROL_SYSTEM
+SI_SDR_CAP_DB = phase2_scores.SI_SDR_CAP_DB
 
 
 def _load(csv_paths: list[Path]) -> list[dict]:
@@ -54,29 +53,7 @@ def _load(csv_paths: list[Path]) -> list[dict]:
     instrumentation landed -- an older 5-column file is rejected loudly rather
     than silently aggregated into a single meaningless m-group.
     """
-    rows: list[dict] = []
-    for path in csv_paths:
-        with open(path, newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            if reader.fieldnames is None or "m" not in reader.fieldnames:
-                raise SystemExit(
-                    f"{path} has no 'm' column -- it predates the accumulation "
-                    "instrumentation. Re-run scripts/run_phase2.py to regenerate it."
-                )
-            for row in reader:
-                value = float(row["si_sdr"])
-                if math.isnan(value):  # speaker not active at this depth
-                    continue
-                rows.append({
-                    "source": path.name,
-                    "system": row["system"],
-                    "m": int(row["m"]),
-                    "depth": int(row["depth"]),
-                    "si_sdr": max(-SI_SDR_CAP_DB, min(SI_SDR_CAP_DB, value)),
-                })
-    if not rows:
-        raise SystemExit("no scoreable rows found in the given CSVs")
-    return rows
+    return phase2_scores.load_score_rows(csv_paths, required_columns=("m",))
 
 
 def _mean(rows: list[dict], system: str, m: int, depth: int) -> float | None:

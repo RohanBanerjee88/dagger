@@ -66,6 +66,7 @@ from dagger.enroll.encoder import TitaNetEncoder
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
 from dagger.gate.confidence import confidence_gate
+from dagger.metrics.phase2_scores import SI_SDR_CAP_DB, clip_score
 from dagger.metrics.sisdr import si_sdr_by_depth
 from dagger.reconstruct.deflation import reconstruct_all_deflation
 from dagger.reconstruct.stitch import reconstruct_all
@@ -93,22 +94,11 @@ GATE_FIELDS = [
     "accepted", "mean_variance", "margin", "vad_coverage", "artifact_score", "reason",
 ]
 
-# si_sdr() legitimately returns +-inf (a perfect estimate / a silent estimate
-# against real target energy -- see dagger.metrics.sisdr.si_sdr's docstring),
-# not "undefined." Only nan ("speaker not active here, nothing to score") should
-# be excluded from an aggregate mean; +-inf are real, informative outcomes and
-# get clipped to this cap so one perfect/failed row can't make the mean itself
-# +-inf. A plain np.isfinite() filter would silently drop both alongside nan --
-# that was a real Phase 2 bug (44% of depth-1 rows are exactly +inf, being
-# solo copy-through, and were vanishing from the reported depth-1 mean).
-SI_SDR_CAP_DB = 50.0
-
-
-def _clip_score(value: float) -> float | None:
-    """``None`` for nan (exclude); ``value`` clipped to +-SI_SDR_CAP_DB otherwise."""
-    if np.isnan(value):
-        return None
-    return float(np.clip(value, -SI_SDR_CAP_DB, SI_SDR_CAP_DB))
+# SI_SDR_CAP_DB and _clip_score now live in dagger.metrics.phase2_scores, shared
+# with scripts/aggregate_phase2.py and scripts/plot_phase2_depth.py. They used to
+# be defined once per script, and the 2026-07-26 +-inf bug had to be fixed twice
+# because of it. Re-exported here so the name stays importable at this path.
+_clip_score = clip_score
 
 
 def _device(preferred: str | None) -> str:
