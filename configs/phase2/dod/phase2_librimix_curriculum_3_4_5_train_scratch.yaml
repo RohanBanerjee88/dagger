@@ -34,10 +34,23 @@
 # 1000/depth x 10 epochs (training alone, evals in a second session) is the
 # higher-exposure option.
 #
-# CHECK AFTER EPOCH 1: expected steady-state cost is ~2508s/epoch (~42 min). If
-# the first epoch exceeds ~50 min, 10 epochs plus evals will not fit -- stop,
-# drop `epochs` to 8, and restart. `checkpoint_every: 2` means an interrupted run
-# still leaves a usable checkpoint either way.
+# CHECK AFTER EPOCH 1: expected steady-state cost is ~2508s/epoch (~42 min); the
+# 2026-08-09 run came in under that at ~38 min. If the first epoch exceeds ~50
+# min, 10 epochs plus evals will not fit -- stop, drop `epochs` to 8, and
+# restart. `checkpoint_every: 2` means an interrupted run still leaves a usable
+# checkpoint either way.
+#
+# WATCH THE GRAD-NORM LINE, not just the loss. Each epoch logs
+# `grad_norm: median=... max=... clipped=...%`. Healthy is a median comfortably
+# below `grad_clip` with a small clipped-%. If the median climbs toward 50 and
+# clipped-% marches past ~50%, the clip is throttling again and the loss
+# flattening is NOT convergence -- that is the exact failure this run exists to
+# rule out, and the fix then is a running-percentile clip, not a third bump.
+#
+# Do NOT also raise `epochs` to spend the ~3.3h of leftover headroom. This run
+# changes ONE variable against 2026-08-09's, so that "the accumulation effect
+# returned" can be attributed to the clip rather than to extra training -- those
+# two readings imply different claims in the paper. The headroom is margin.
 #
 # Needs n_src=4 and n_src=5 TRAINING metadata, which Kaggle sessions do not
 # persist -- regenerate both before running:
@@ -93,8 +106,18 @@ train:
   segment_seconds: 4.0
   lr: 0.0003          # NOT 1e-3: at 1e-3 the optimizer never escapes the
                       # passthrough plateau (CLAUDE.md Phase 1, 2026-07-12).
-  grad_clip: 10.0     # single unclipped steps repeatedly erased hundreds of
-                      # steps of descent in the Phase 1 overfit log.
+  # Raised from 10.0 after the 2026-08-09 run: the median gradient norm crossed
+  # 10 at epoch 6 and ended at 15.14 with 93% of steps clipped, so the last four
+  # epochs were normalized-gradient descent at a shrinking step size -- a hidden
+  # LR schedule, exactly what _grad_norm_summary's docstring says to raise the
+  # clip for. si_sdr_loss gradients GROW as the estimate approaches the target
+  # (error energy is in the denominator), so a fixed clip gets more binding the
+  # better the model becomes; 10.0 was inherited from Phase 1, where it was rare
+  # spike protection, and no warm-started run ever traversed the high-gradient
+  # region from random init. 50 still cuts the genuine spikes hard (the observed
+  # maxima were 1520/2183/896) while sitting ~3x above the previous run's final
+  # median.
+  grad_clip: 50.0
   checkpoint_every: 2
-  checkpoint_out: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch.pt
+  checkpoint_out: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
   # No init_checkpoint -- this is the point of the config.

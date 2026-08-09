@@ -26,7 +26,7 @@ extractor:
   n_heads: 4
   n_tokens: 8
   cross_attn_blocks: 6
-  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch.pt
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
 
 gate:
   tau_margin: 0.1
@@ -38,5 +38,11 @@ refine:
   rounds: 2
 
 eval:
-  results_dir: results
-  tag: scratch345   # writes results/phase2_librimix_3spk_scratch345.{csv,md}
+  # Writes straight into the DoD results dir -- the 2026-08-09 outputs had to
+  # be moved here by hand afterwards.
+  results_dir: results/phase2/dod
+  # Distinct from the 2026-08-09 `scratch345` tag ON PURPOSE: that run is the
+  # baseline this one is compared against, and a shared tag would overwrite it
+  # in place. Writes
+  # results/phase2/dod/phase2_librimix_3spk_scratch345clip50.{csv,md}
+  tag: scratch345clip50
