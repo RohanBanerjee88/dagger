@@ -58,46 +58,30 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dagger.audio.provenance import original_mixture
-from dagger.data import Scene, build_dataset
+from dagger.data import build_dataset
 from dagger.data.paths import load_env
-from dagger.diarize.oracle import activity_matrix, overlap_depth, overlap_mixture, solo_overlap_regions
 from dagger.enroll.encoder import TitaNetEncoder
-from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
+from dagger.enroll.topk import NoSoloRegionError
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
-from dagger.gate.confidence import confidence_gate
 from dagger.metrics.phase2_scores import SI_SDR_CAP_DB, clip_score
-from dagger.metrics.sisdr import si_sdr_by_depth
-from dagger.reconstruct.deflation import reconstruct_all_deflation
-from dagger.reconstruct.stitch import reconstruct_all
-from dagger.refine.coarse_to_fine import refine_embeddings
 
-SYSTEMS = ("no_recursion", "ungated_deflation", "gated_deflation", "coarse_to_fine")
+# The four systems and the per-scene scoring body now live in dagger.eval.systems,
+# shared with scripts/run_phase3.py, which runs the same comparison twice per
+# scene (oracle regions vs. real ones). Re-exported here so every name stays
+# importable at this path -- the reporting tests load this script by path and
+# reach for them. Same reasoning as dagger.metrics.phase2_scores one level down:
+# a second copy is how the 2026-07-26 +-inf bug came to need fixing twice.
+from dagger.eval.systems import (  # noqa: E402  (kept beside its siblings)
+    DEFLATION_SYSTEMS,
+    GATE_FIELDS,
+    SCORE_FIELDS,
+    SYSTEMS,
+    accepted_before as _accepted_before,
+    deflation_order,
+    make_gate_fn as _make_gate_fn,
+    score_scene,
+)
 
-# The two systems that run dagger.reconstruct.deflation, i.e. the only ones for
-# which `deflation_index`/`n_accepted_before` mean anything. Membership is
-# explicit rather than a name test (`endswith("deflation")`) so adding a system
-# can't silently opt it in.
-DEFLATION_SYSTEMS = ("ungated_deflation", "gated_deflation")
-
-SCORE_FIELDS = [
-    "scene", "speaker", "system", "m", "depth", "si_sdr",
-    "deflation_index", "n_accepted_before", "refine_rounds",
-]
-# Gate decisions live in their own file, at their own grain: one per (scene,
-# speaker, system, round). Folding them into the score rows would duplicate each
-# decision across however many depths that speaker happens to span, so any
-# accept rate counted from those rows would be inflated by a depth-dependent
-# factor. Keeping the two grains in separate files makes that mistake hard.
-GATE_FIELDS = [
-    "scene", "speaker", "system", "round",
-    "accepted", "mean_variance", "margin", "vad_coverage", "artifact_score", "reason",
-]
-
-# SI_SDR_CAP_DB and _clip_score now live in dagger.metrics.phase2_scores, shared
-# with scripts/aggregate_phase2.py and scripts/plot_phase2_depth.py. They used to
-# be defined once per script, and the 2026-07-26 +-inf bug had to be fixed twice
-# because of it. Re-exported here so the name stays importable at this path.
 _clip_score = clip_score
 
 
@@ -107,181 +91,6 @@ def _device(preferred: str | None) -> str:
     if preferred:
         return preferred
     return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def _make_gate_fn(embeddings, variances, activity, overlap, encoder, sample_rate, gate_cfg):
-    num_speakers = embeddings.shape[0]
-
-    def gate_fn(i: int, estimate: np.ndarray):
-        others = [embeddings[j] for j in range(num_speakers) if j != i]
-        expected_active = activity[i].astype(bool) & overlap.astype(bool)
-        return confidence_gate(
-            estimate, sample_rate, embeddings[i], others, encoder,
-            variances[i], expected_active,
-            tau_margin=gate_cfg["tau_margin"],
-            max_mean_variance=gate_cfg["max_mean_variance"],
-            min_vad_coverage=gate_cfg["min_vad_coverage"],
-            max_artifact_score=gate_cfg["max_artifact_score"],
-        )
-
-    return gate_fn
-
-
-def _accepted_before(order: list[int], accept_sequence: np.ndarray) -> list[int]:
-    """Speaker-indexed count of accepted estimates subtracted into the residual
-    *before* each speaker was extracted -- the accumulation counter Theorem 3's
-    ``L*||E_(m-1)||`` penalty is indexed by.
-
-    ``accept_sequence`` is speaker-indexed (see
-    :func:`dagger.reconstruct.deflation.reconstruct_all_deflation`), so the
-    prefix has to be taken over ``order``, not over speaker ids. Ungated
-    deflation accepts unconditionally, so there this must equal each speaker's
-    position in ``order``; gated deflation can only be lower.
-    """
-    return [
-        sum(int(accept_sequence[j]) for j in order[: order.index(i)])
-        for i in range(len(order))
-    ]
-
-
-def score_scene(
-    scene: Scene,
-    fade: int,
-    enroll_k: int,
-    min_clip_ms: float,
-    enroll_budget_ms: float | None,
-    encoder: TitaNetEncoder,
-    extractor: TFGridNetCrossAttnExtractor,
-    gate_cfg: dict,
-    refine_rounds: int,
-) -> tuple[list[dict], list[dict]]:
-    """Run all four Phase 2 systems on one scene.
-
-    Returns ``(score_rows, gate_rows)`` -- one score row per (speaker, depth,
-    system), and one gate row per (speaker, system, round) for the two systems
-    that actually run the confidence gate. See ``SCORE_FIELDS``/``GATE_FIELDS``
-    for why the two are kept apart.
-    """
-    n = scene.mixture.shape[0]
-    activity, speakers = activity_matrix(
-        scene.segments, num_samples=n, sample_rate=scene.sample_rate, speakers=scene.speakers
-    )
-    solo, overlap = solo_overlap_regions(activity)
-    depth = overlap_depth(activity)
-    x = original_mixture(scene.mixture, label="x")
-    x_O = overlap_mixture(x, overlap, label="x_O")
-    num_speakers = len(speakers)
-
-    enrollments = [
-        enroll_speaker(
-            scene.mixture, solo[i], activity[i], scene.sample_rate,
-            encoder, k=enroll_k, min_clip_ms=min_clip_ms, budget_ms=enroll_budget_ms,
-        )
-        for i in range(num_speakers)
-    ]
-    embeddings = np.stack([e.embedding for e in enrollments], axis=0)
-    variances = np.stack([e.variance for e in enrollments], axis=0)
-
-    # Deflation processing order: ascending mean enrollment variance, i.e. the
-    # most-confidently-enrolled speaker goes first (order is load-bearing only
-    # for the deflation systems -- coarse_to_fine's batched refinement is
-    # order-independent, see dagger.refine.coarse_to_fine's docstring).
-    order = sorted(range(num_speakers), key=lambda i: float(np.mean(variances[i])))
-    deflation_idx: dict[int, int] = {i: j for j, i in enumerate(order)}  # speaker -> position in order
-
-    outputs: dict[str, np.ndarray] = {}
-    outputs["no_recursion"] = reconstruct_all(x, x_O, activity, solo, embeddings, extractor, fade=fade)
-
-    # Each deflation call binds its OWN result names: reusing one pair across
-    # both calls would let the gated run's telemetry overwrite the ungated
-    # run's and end up reported against the wrong system.
-    outputs["ungated_deflation"], _, ungated_accepts = reconstruct_all_deflation(
-        x, x_O, activity, solo, embeddings, extractor, order, gate_fn=None, fade=fade,
-    )
-    gate_fn = _make_gate_fn(embeddings, variances, activity, overlap, encoder, scene.sample_rate, gate_cfg)
-    outputs["gated_deflation"], gated_gate_results, gated_accepts = reconstruct_all_deflation(
-        x, x_O, activity, solo, embeddings, extractor, order, gate_fn=gate_fn, fade=fade,
-    )
-
-    n_accepted_before = {
-        "ungated_deflation": _accepted_before(order, ungated_accepts),
-        "gated_deflation": _accepted_before(order, gated_accepts),
-    }
-    # Ungated accepts unconditionally, so its accumulation count must be exactly
-    # each speaker's position in `order`. Deriving it from the returned accept
-    # sequence rather than hardcoding that lets this assertion catch a
-    # regression in the deflation loop itself.
-    assert n_accepted_before["ungated_deflation"] == [deflation_idx[i] for i in range(num_speakers)]
-
-    refined_embeddings, round_results = refine_embeddings(
-        x, x_O, activity, solo, embeddings, variances, extractor, encoder, scene.sample_rate,
-        rounds=refine_rounds, fade=fade,
-        tau_margin=gate_cfg["tau_margin"], max_mean_variance=gate_cfg["max_mean_variance"],
-        min_vad_coverage=gate_cfg["min_vad_coverage"], max_artifact_score=gate_cfg["max_artifact_score"],
-    )
-    outputs["coarse_to_fine"] = reconstruct_all(
-        x, x_O, activity, solo, refined_embeddings, extractor, fade=fade
-    )
-
-    rows = []
-    for system_name in SYSTEMS:
-        system_outputs = outputs[system_name]
-        is_deflation = system_name in DEFLATION_SYSTEMS
-        for i, spk in enumerate(speakers):
-            by_depth = si_sdr_by_depth(system_outputs[i], scene.sources[i], depth)
-            for k, score in by_depth.items():
-                rows.append({
-                    "scene": scene.name,
-                    "speaker": spk,
-                    "system": system_name,
-                    "m": num_speakers,
-                    "depth": k,
-                    "si_sdr": score,
-                    # None (not 0) for the accumulation-free systems: 0 is a
-                    # legitimate deflation_index (the first speaker in `order`),
-                    # so writing it here would make "no accumulation" and "not
-                    # applicable" indistinguishable in the CSV.
-                    "deflation_index": deflation_idx[i] if is_deflation else None,
-                    "n_accepted_before": n_accepted_before[system_name][i] if is_deflation else None,
-                    "refine_rounds": refine_rounds if system_name == "coarse_to_fine" else 0,
-                })
-
-    gate_rows = []
-    for i, spk in enumerate(speakers):
-        result = gated_gate_results[i]
-        if result is not None:
-            gate_rows.append({
-                "scene": scene.name, "speaker": spk, "system": "gated_deflation", "round": 0,
-                "accepted": result.accepted, "mean_variance": result.mean_variance,
-                "margin": result.margin, "vad_coverage": result.vad_coverage,
-                "artifact_score": result.artifact_score, "reason": result.reason,
-            })
-    for round_index, per_speaker in enumerate(round_results):
-        for i, spk in enumerate(speakers):
-            result = per_speaker[i]
-            row = {
-                "scene": scene.name, "speaker": spk, "system": "coarse_to_fine",
-                "round": round_index,
-            }
-            if result is None:
-                # No overlap-only region to re-embed from, so no gate decision
-                # was made. Recorded rather than skipped -- a missing row would
-                # be silently indistinguishable from a rejection when accept
-                # rates are counted.
-                row.update({
-                    "accepted": None, "mean_variance": None, "margin": None,
-                    "vad_coverage": None, "artifact_score": None,
-                    "reason": "no_overlap_clip",
-                })
-            else:
-                row.update({
-                    "accepted": result.accepted, "mean_variance": result.mean_variance,
-                    "margin": result.margin, "vad_coverage": result.vad_coverage,
-                    "artifact_score": result.artifact_score, "reason": result.reason,
-                })
-            gate_rows.append(row)
-
-    return rows, gate_rows
 
 
 def _select(rows: list[dict], **equals) -> list[dict]:
@@ -446,12 +255,15 @@ def _write_results(rows: list[dict], gate_rows: list[dict], out_dir: Path, stem:
     md_path = out_dir / f"{stem}.md"
 
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=SCORE_FIELDS)
+        # extrasaction="ignore": score_scene also returns a Phase 3-only
+        # `cluster` column (which predicted cluster a row came from). Ignoring it
+        # keeps this file's schema and bytes exactly as they were.
+        writer = csv.DictWriter(fh, fieldnames=SCORE_FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
     with open(gate_csv_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=GATE_FIELDS)
+        writer = csv.DictWriter(fh, fieldnames=GATE_FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(gate_rows)
 

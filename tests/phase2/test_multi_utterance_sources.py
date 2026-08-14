@@ -55,6 +55,9 @@ def _dataset(monkeypatch, tmp_path, *, min_solo_ms: float, n_src: int = 2):
     ds.placement = "scheduled"
     ds.limit = None
     ds.offset = 0
+    # Phase 3's optional wideband mixture. None = off, which is what every
+    # config predating it does, so these scenes are unaffected.
+    ds.diarizer_sample_rate = None
     ds.data_root = tmp_path
     return ds
 

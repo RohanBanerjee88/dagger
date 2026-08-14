@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dagger.audio.provenance import TrackedSignal, original_mixture
+from dagger.diarize.base import Diarizer
 
 
 @dataclass(frozen=True)
@@ -134,3 +135,27 @@ def overlap_mixture(
     if not isinstance(x, TrackedSignal):
         x = original_mixture(np.asarray(x))
     return x.masked(overlap, label=label)
+
+
+class OracleDiarizer(Diarizer):
+    """The ground-truth path, wearing the :class:`~dagger.diarize.base.Diarizer` interface.
+
+    Returns ``scene.segments`` — spans derived from the *clean sources* by
+    :mod:`dagger.data.activity`, so the activity matrix is bit-exact and solo
+    regions are genuinely clean.
+
+    It exists purely so the oracle and real arms of Phase 3 run through **one**
+    code path. Guardrail §6.2 requires the oracle number beside every real one;
+    that comparison is only trustworthy if the two arms differ in nothing but the
+    diarizer, and the cheapest way to guarantee that is to give the oracle a
+    backend rather than an ``if``.
+    """
+
+    #: The oracle's labels are ``scene.speakers`` by construction, and binding
+    #: them keeps an all-zero row for any speaker whose placement produced no
+    #: segments -- without which row `i` would stop meaning source `i`. See
+    #: :attr:`~dagger.diarize.base.Diarizer.binds_scene_speakers`.
+    binds_scene_speakers = True
+
+    def diarize(self, scene) -> list[Segment]:
+        return list(scene.segments)

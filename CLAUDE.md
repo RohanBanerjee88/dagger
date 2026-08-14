@@ -1144,6 +1144,111 @@ it); `V_i` never firing (threshold too loose) or firing on everything (too tight
 
 **Definition of done:** end-to-end results with real diarization, plus the oracle-vs-real gap table.
 
+**Split into two stages (2026-08-14).** Stage A needs **no GPU training**: build the diarizer
+seam, the DER metric and the paired oracle-vs-real harness, and measure the gap on the existing
+Phase 2 checkpoint. Stage B then designs mask augmentation against the *measured* error profile.
+The ordering is deliberate — the first five Phase 2 runs were spent sizing a remedy before the
+disease was measured, and this phase does not repeat that.
+
+**STAGE A CODE LANDED (2026-08-14): implemented, unit-tested offline, NOT yet run against real
+data or pyannote.** Full suite 350 passed / 1 skipped (292 baseline + 58 new; the skip is a
+`pyannote.metrics` cross-check that needs the `[diarize]` extra). Nothing here has seen a real
+diarizer yet — treat every claim below as "the code does this", not "the data says this".
+
+*What was built.* A `Diarizer` ABC (`dagger/diarize/base.py`) copying the one abstraction in this
+repo that already survived a backend swap (`SpeakerEncoder`), with `OracleDiarizer` and
+`PyannoteDiarizer` (`dagger/diarize/pyannote_diarizer.py`, imports deferred) behind it;
+`dagger/diarize/regions.py` collapsing the 6-times-duplicated
+`activity_matrix -> solo_overlap_regions -> overlap_depth` dance; `dagger/diarize/mapping.py`
+(Hungarian cluster->speaker matching); `dagger/metrics/der.py`; `scripts/run_phase3.py` +
+`scripts/aggregate_phase3.py`; `configs/phase3/{dod,experiments}/`; a new `[diarize]` extra
+(NOT folded into `[ml]` — CI installs `dev,data` only and pyannote pulls a gated checkpoint).
+The six existing `activity_matrix` call sites are **untouched**, so no committed number can shift.
+
+*The one structural refactor.* `score_scene`/`_make_gate_fn`/`_accepted_before` moved from
+`scripts/run_phase2.py` into **`dagger/eval/systems.py`**, which `run_phase2.py` re-exports so
+every module-level name stays importable at the old path. Phase 3 runs the same four systems
+twice per scene, and a second copy is exactly how the 2026-07-26 `+-inf` bug came to need fixing
+twice. **Verified equivalent**: the two helpers are AST-identical to their originals, and the
+pre-refactor `score_scene` (pulled from git) produces **identical** score rows and gate rows to
+the new one on synthetic scenes. The corpus-based byte-identical CSV check still has to run on
+the GPU box.
+
+*Four arms, each varying one thing* (`scripts/run_phase3.py`), all scoring the same scenes in the
+same pass so rows pair exactly on `(scene, speaker, depth, system)`: `oracle` (mandatory, §6.2 —
+the script exits if it is absent), `real` (free speaker-count estimation, the honest condition),
+`real_forced_m` (`num_speakers=m`, isolating segmentation from counting error), and
+`real_index_order` — see below.
+
+*`real_index_order` exists because of a BIAS, not tidiness.* Deflation order is ascending `V_i`
+(`run_phase2.py:189`, now `dagger/eval/systems.py::deflation_order`). Under oracle diarization
+`V_i` is identically 0 and Python's sort is stable, so **that sort has never actually done
+anything**. Real diarization fragments solo regions, `V_i` becomes real, and the sort becomes a
+real permutation — and position in it *is* `n_accepted_before`, the dominant driver of SI-SDR for
+the deflation systems (~1.8 dB across levels). It is not symmetric: whichever speaker's solo
+region best survives diarization earns the lowest `V_i` and is promoted to level 0, the
+least-damaged slot — and that speaker's extraction was already the easiest. So the real arm is
+*flattered* and the gap is biased **downwards**. Read the decomposition as
+`real_index_order - oracle` = diarization error alone, `real - real_index_order` = the reordering
+`V_i` induces. `no_recursion` and `coarse_to_fine` take no deflation order, so they must be
+**identical** across those two arms — asserted as a free check on the arm machinery.
+
+*Sample rate.* `dataset.diarizer_sample_rate: 16000` makes the loader build a second, NATIVE
+16 kHz mixture from the same placement (`Scene.mixture_hi`). Upsampling the 8 kHz mixture instead
+invents nothing above 4 kHz, so DER would be inflated for a reason unrelated to diarization
+difficulty — and that inflation would land straight in the headline gap. The 8 kHz scene is
+bit-identical with the key absent (pinned by test). Restricted to integer rate ratios so
+placements scale exactly.
+
+*Three bugs found while building, each of which would have produced a plausible-looking wrong
+number with nothing failing — the signature of every reporting defect this project has shipped:*
+
+1. **The gap table would have been EMPTY.** Score rows keyed `speaker` on the cluster id, so real
+   rows read `SPEAKER_00` and oracle rows `s1`; every paired lookup missed. Rows now carry the
+   *attributed ground-truth* label, with `cluster` as separate Phase 3-only provenance
+   (`run_phase2.py`'s writer uses `extrasaction="ignore"`, so its schema and bytes are untouched).
+2. **A spurious cluster killed the whole scene.** An invented cluster usually lies inside another
+   speaker's speech, so it has no solo region and `enroll_speaker` raises. Skipping the scene
+   would discard scenes *in proportion to how badly the diarizer did* — the same selection bias
+   that silently shrank Phase 1's dataset. `score_scene` gained `on_unenrollable`, defaulting to
+   `"raise"` (Phase 2 behaviour untouched); Phase 3 passes `"drop"` for every arm.
+3. **A silent speaker lost its row.** The scene builders skip zero-length chunks, so with
+   discovered labels the oracle arm would drop a row and shift every downstream index. The oracle
+   now binds its label set (`Diarizer.binds_scene_speakers`); only the real path discovers. Also
+   corrected: oracle row order matches `scene.speakers` because both segment builders iterate the
+   speaker *list* (`activity.py:145,177`), NOT because of solo-slot timing.
+
+*DER is overlap-aware on purpose*: it scores per-frame speaker **counts**, not one label per
+frame. A single-label-per-frame DER scores every overlap frame as at best partially right by
+construction, which for a project about overlap would mostly measure its own simplification.
+`overlap_recall` is broken out because overlap is the only region where `G` runs at all (solo is
+copied through), so it should track the SI-SDR gap far better than aggregate DER.
+
+*`V_i` should come alive here for the first time.* It has been **exactly 0.0** in every run this
+project has ever done, structurally: `schedule_solo_then_overlap` gives one solo run -> one clip
+-> variance over one sample. A real diarizer fragments solo regions, enrollment draws k>1 clips,
+and the variance becomes real. **The single load-bearing check on the smoke run is a nonzero
+`mean_variance` in `_gate.csv`.** Note this also makes the deflation-order sort live, which is
+what arm 4 exists to separate.
+
+*Not yet done / known gaps.* Nothing has run against pyannote or real data. The clip50 checkpoint
+the DoD config points at is **not on the HF Hub** (only the Phase 1 and Phase 2-finetuned ones
+are), so a fresh Kaggle session must attach it as a dataset or re-upload it. The dev split at
+`offset: 650` (`configs/phase2/experiments/phase2_gate_tune_dev.yaml`) **overlaps** rows
+[650, 800) of the clip50 training run, which used `limit: 800` — move it to `offset: 1000` before
+any Stage B gate tuning, or thresholds get tuned on scenes `G` trained on. Two limitations stay
+recorded rather than fixed, because Phase 3 cannot vary them: LibriMix's synthetic geometry (hard
+boundaries, no reverb, no turn-taking) makes this gap a **lower bound** on the real-corpora gap
+Phase 4 will see; and the resampler fallback warning exists so a future corpus without
+`mixture_hi` cannot silently reintroduce band-limited diarizer input.
+
+*Stage B (not started).* Mask augmentation in `build_scene_crop_dataset`'s `_prepare` (not
+`__getitem__` — `_prepare` is where enrollment happens, so augmenting there contaminates
+enrollment realistically, which is what actually exercises `V_i`; note `w_overlap` is precomputed
+from clean masks and must be recomputed). Then `scripts/tune_gate.py` on the dev split (it already
+implements the literal DoD check, `_contaminated_mask`), thresholds frozen and applied unchanged.
+Then the 2x2: {baseline ckpt, mask-augmented ckpt} x {oracle, real}.
+
 ### ☐ Phase 4 — Real corpora + full ablation
 
 **Goal:** the results section.
@@ -1220,8 +1325,10 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-08-10 — Phase 2 DoD MET (see the block at the end of §5 Phase 2).
-Ordering holds 18/18 across two independent scratch checkpoints; the accumulation
-magnitude replicated at 1.81 vs 1.83 dB, so the grad-clip defect was not its cause.
-Next: Phase 3 (real diarization). Per-phase history lives in §5, not here — this
-footer is deliberately kept to a few lines so it cannot drift out of sync with it.*
+*Last updated: 2026-08-14 — Phase 3 Stage A CODE landed (see §5 Phase 3): the diarizer
+seam, DER, cluster mapping and the 4-arm paired harness are implemented and unit-tested
+offline (350 passed), but NOTHING has run against pyannote or real data yet. Phase 2's
+DoD remains met and unaffected. Next: the Stage A smoke run, whose one load-bearing
+check is a nonzero `mean_variance` in `_gate.csv` — `V_i` has been exactly 0.0 in every
+run to date. Per-phase history lives in §5, not here — this footer is deliberately kept
+to a few lines so it cannot drift out of sync with it.*

@@ -87,6 +87,27 @@ class LibriMixDataset(SceneDataset):
         self.placement = str(cfg.get("placement", "chain"))
         if self.placement not in ("chain", "scheduled"):
             raise ValueError(f"placement must be 'chain' or 'scheduled', got {self.placement!r}.")
+        # Optional wideband copy of each mixture, for a diarizer that needs a
+        # higher rate than the pipeline runs at (Phase 3: pyannote community-1 is
+        # 16 kHz, this pipeline is 8 kHz). Building it natively from the SAME
+        # placement -- rather than upsampling the 8 kHz mixture -- is the point:
+        # upsampling invents nothing above 4 kHz, so it would inflate DER for a
+        # reason unrelated to diarization difficulty, and that inflation would
+        # land in Phase 3's headline oracle-vs-real gap.
+        #
+        # Restricted to integer multiples of the pipeline rate so placements
+        # scale exactly (16000/8000 = 2). A fractional ratio would round chunk
+        # boundaries independently at the two rates, and the two mixtures would
+        # slowly desynchronise -- silently, and worst at the segment seams the
+        # diarizer is judged on.
+        self.diarizer_sample_rate = cfg.get("diarizer_sample_rate")
+        if self.diarizer_sample_rate is not None:
+            self.diarizer_sample_rate = int(self.diarizer_sample_rate)
+            if self.diarizer_sample_rate % self.sample_rate != 0:
+                raise ValueError(
+                    f"diarizer_sample_rate ({self.diarizer_sample_rate}) must be an "
+                    f"integer multiple of sample_rate ({self.sample_rate})."
+                )
         self.limit = cfg.get("limit")
         # Skip this many rows before applying `limit`. Defaults to 0, so every
         # existing config keeps its exact scene list. Its purpose is a dev split
@@ -157,6 +178,18 @@ class LibriMixDataset(SceneDataset):
                 sources_raw, gains=gains, offsets=offsets, length_mode="max"
             )
             segments = segments_from_placement(offsets, lengths, speakers, self.sample_rate)
+
+        mixture_hi = None
+        if self.diarizer_sample_rate is not None:
+            # Placement above is computed at self.sample_rate and is NOT
+            # recomputed here -- the 8 kHz scene, its segments, and its depth
+            # arrays stay bit-identical to a run without this key. The wideband
+            # mixture is the same scene at more bandwidth, so it reuses those
+            # placements scaled by the (integer) rate ratio.
+            mixture_hi = self._mix_wideband(row, chunks_or_offsets=(
+                chunks if self.placement == "scheduled" else offsets
+            ), gains=gains, lengths=lengths)
+
         return Scene(
             mixture=mixture,
             sources=sources,
@@ -164,4 +197,65 @@ class LibriMixDataset(SceneDataset):
             speakers=speakers,
             sample_rate=self.sample_rate,
             name=str(row.get("mixture_ID", "")),
+            mixture_hi=mixture_hi,
+            hi_sample_rate=self.diarizer_sample_rate,
         )
+
+    def _mix_wideband(self, row: dict, chunks_or_offsets, gains, lengths) -> np.ndarray:
+        """Re-mix this row at ``diarizer_sample_rate`` using the SAME placement.
+
+        Re-reads the sources at the higher rate (they are natively 16 kHz on
+        disk, so this recovers real bandwidth rather than interpolating) and
+        scales the already-computed placement by the integer rate ratio.
+
+        Deriving the placement by scaling, rather than recomputing it from the
+        wideband lengths, is what guarantees the two mixtures describe the same
+        scene: ``schedule_solo_then_overlap`` is a function of the lengths, and
+        resampling can change a length by a sample, which would be enough to
+        shift a solo/overlap boundary between the rates.
+        """
+        ratio = self.diarizer_sample_rate // self.sample_rate
+        sources_hi: list[np.ndarray] = []
+        for k in range(1, self.n_src + 1):
+            paths = [
+                _resolve_source_path(part, self.data_root)
+                for part in row[f"source_{k}_path"].split("|")
+            ]
+            parts = [read_wav(path, self.diarizer_sample_rate) for path in paths]
+            sources_hi.append(parts[0] if len(parts) == 1 else np.concatenate(parts))
+
+        if self.placement == "scheduled":
+            chunks_hi = [
+                [
+                    (offset * ratio, src_start * ratio, chunk_len * ratio)
+                    for offset, src_start, chunk_len in speaker_chunks
+                ]
+                for speaker_chunks in chunks_or_offsets
+            ]
+            # A resampled source can come up a sample or two short of
+            # length*ratio; the scheduler's chunks were sized against the 8 kHz
+            # lengths, so pad rather than let mix_scheduled_sources index past
+            # the end.
+            needed = [
+                max((s + n for _, s, n in speaker_chunks), default=0)
+                for speaker_chunks in chunks_hi
+            ]
+            sources_hi = [
+                np.pad(src, (0, max(0, need - src.shape[0])))
+                for src, need in zip(sources_hi, needed)
+            ]
+            _, mixture_hi = mix_scheduled_sources(
+                sources_hi, chunks_hi, gains=gains, length_mode="max"
+            )
+        else:
+            sources_hi = [
+                np.pad(src, (0, max(0, length * ratio - src.shape[0])))[: length * ratio]
+                for src, length in zip(sources_hi, lengths)
+            ]
+            _, mixture_hi = mix_sources(
+                sources_hi,
+                gains=gains,
+                offsets=[offset * ratio for offset in chunks_or_offsets],
+                length_mode="max",
+            )
+        return mixture_hi

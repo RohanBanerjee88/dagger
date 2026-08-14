@@ -1,0 +1,63 @@
+# Phase 3 smoke: 5 scenes, enough to prove the wiring before spending a session.
+#
+# Check these four things by hand in the output -- each catches a different
+# class of failure that would otherwise survive into the DoD run:
+#
+#   1. The `oracle` arm's rows match a Phase 2 run on the same scenes. If not,
+#      the dagger/eval/systems.py move changed behaviour.
+#   2. `_diar.csv` shows der ~= 0 for the oracle arm (it is being scored against
+#      itself) and something plausible (~5-25%) for `real`. A DER of 0 on a real
+#      arm means the diarizer is not actually running.
+#   3. `_gate.csv` shows NONZERO mean_variance on the real arms. That single
+#      column is the proof V_i is finally alive -- it has been exactly 0.0 in
+#      every run this project has ever done.
+#   4. `no_recursion` and `coarse_to_fine` are IDENTICAL between `real` and
+#      `real_index_order`. Neither depends on deflation order, so any difference
+#      means the order policy leaked somewhere it should not have.
+#
+#   DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_smoke.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test.csv
+  n_src: 3
+  placement: scheduled
+  min_solo_ms: 1000.0
+  limit: 5
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/community-1
+  arms: [oracle, real, real_forced_m, real_index_order]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: smoke

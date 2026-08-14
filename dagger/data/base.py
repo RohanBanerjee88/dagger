@@ -29,6 +29,11 @@ class Scene:
     * ``speakers`` — stable speaker order; row ``i`` of ``sources``/activity.
     * ``sample_rate`` — Hz; masks are sampled at this rate so they align with
       the waveform exactly (Phase 0 red flag: framerate/sample-rate mismatch).
+    * ``mixture_hi`` / ``hi_sample_rate`` — optional wideband copy of the same
+      mixture, for models that need a higher rate than the pipeline runs at
+      (Phase 3: pyannote ``community-1`` is 16 kHz while the pipeline is 8 kHz).
+      Same scene, same placement, more bandwidth — NOT a different mixture.
+      ``None`` unless ``dataset.diarizer_sample_rate`` was set.
     """
 
     mixture: np.ndarray
@@ -38,6 +43,10 @@ class Scene:
     sample_rate: int
     #: Optional human-readable id for logging (e.g. the mixture id).
     name: str = ""
+    # Appended after `name`, with defaults, so every existing positional
+    # construction and every existing config keeps working untouched.
+    mixture_hi: np.ndarray | None = None
+    hi_sample_rate: int | None = None
 
 
 class SceneDataset(abc.ABC):

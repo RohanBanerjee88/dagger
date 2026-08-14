@@ -84,6 +84,10 @@ def load_score_rows(
                     "speaker": row.get("speaker"),
                     "system": row["system"],
                     "si_sdr": score,
+                    # Phase 3's arm name (oracle / real / ...). Absent in every
+                    # Phase 2 CSV, where it reads as None -- so those files keep
+                    # loading unchanged and a mixed set stays distinguishable.
+                    "diarization": row.get("diarization"),
                 }
                 for field in _REQUIRED_INT_FIELDS:
                     record[field] = int(row[field])
@@ -212,4 +216,33 @@ def paired_differences(
 
     left = {key(r): r["si_sdr"] for r in rows if r["system"] == system}
     right = {key(r): r["si_sdr"] for r in rows if r["system"] == control}
+    return [left[k] - right[k] for k in left if k in right]
+
+
+def paired_by_field(
+    rows: Iterable[dict],
+    field: str,
+    left_value: str,
+    right_value: str,
+    *,
+    key_fields: Sequence[str] = ("source", "scene", "speaker", "depth", "system"),
+) -> list[float]:
+    """Per-row ``left - right`` differences across two values of ``field``.
+
+    The general form of :func:`paired_differences`, which pairs across *systems*
+    at fixed conditions; this pairs across any other column at fixed system.
+    Phase 3 uses it on ``diarization`` to difference the oracle and real arms,
+    which is why ``system`` moves into the key: the comparison is "the same
+    system under two diarizers", not "two systems".
+
+    Same reason for pairing rather than subtracting two means -- it cancels scene
+    difficulty *exactly*. Here that matters even more than in Phase 2, since both
+    arms score the identical scenes in the identical pass, so every non-arm
+    source of variance is shared and cancels.
+    """
+    def key(row: dict) -> tuple:
+        return tuple(row[f] for f in key_fields)
+
+    left = {key(r): r["si_sdr"] for r in rows if r.get(field) == left_value}
+    right = {key(r): r["si_sdr"] for r in rows if r.get(field) == right_value}
     return [left[k] - right[k] for k in left if k in right]

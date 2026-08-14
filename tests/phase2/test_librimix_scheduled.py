@@ -38,6 +38,9 @@ def _make_dataset(monkeypatch, *, n_src: int, overlap: float, min_solo_ms: float
     ds.min_solo = int(round(min_solo_ms / 1000.0 * SAMPLE_RATE))
     ds.placement = placement
     ds.limit = None
+    # Phase 3's optional wideband mixture. None = off, which is what every
+    # config predating it does, so these scenes are unaffected.
+    ds.diarizer_sample_rate = None
     ds.data_root = __import__("pathlib").Path("/fake")
     return ds
 

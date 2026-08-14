@@ -44,6 +44,12 @@ ml = [
     "transformers>=4.40",
     "nemo_toolkit[asr]",
 ]
+# Phase 3's real diarizer (pyannote.audio 4.x community-1). Deliberately NOT
+# folded into `ml`: CI installs `dev,data` plus CPU torch only, and pyannote
+# pulls a large dependency tree plus a HuggingFace-gated checkpoint. Everything
+# in dagger/diarize/ except the pyannote backend itself works without this, and
+# the Phase 3 tests run offline against a fake diarizer.
+diarize = ["pyannote.audio>=4.0"]
 dev = ["pytest>=7.0"]
 # Phase 2's depth-stratified plot only (scripts/plot_phase2_depth.py) -- kept
 # separate from `ml` since nothing else needs it.
