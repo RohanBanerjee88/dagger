@@ -36,6 +36,52 @@ DEFAULT_MODEL = "pyannote/speaker-diarization-community-1"
 MODEL_SAMPLE_RATE = 16000
 
 
+def _to_segments(output) -> list[Segment]:
+    """Convert whatever the pipeline returned into our :class:`Segment` list.
+
+    pyannote 4.x returns a ``DiarizeOutput`` object, not the bare
+    ``pyannote.core.Annotation`` that 3.x returned, so a fixed
+    ``output.itertracks(...)`` raises ``AttributeError``. Rather than pin a
+    version, unwrap defensively.
+
+    **``speaker_diarization``, never ``exclusive_speaker_diarization``.** The
+    4.x output carries both. The "exclusive" one assigns at most ONE speaker per
+    instant — it exists to make reconciliation with transcript timestamps easy.
+    Taking it here would silently delete every overlap from the diarization: the
+    overlap mask would collapse toward empty, ``G`` would barely run, DER's
+    ``overlap_recall`` would read ~0, and the whole experiment would be measuring
+    a flattened diarization rather than a real one. That failure would produce
+    numbers, not a crash, which is why the attribute is named explicitly and
+    first.
+    """
+    annotation = getattr(output, "speaker_diarization", output)
+
+    # pyannote.core.Annotation exposes itertracks; some versions' containers are
+    # plain iterables of (segment, label) or (segment, track, label).
+    if hasattr(annotation, "itertracks"):
+        triples = annotation.itertracks(yield_label=True)
+    else:
+        triples = annotation
+
+    segments: list[Segment] = []
+    for item in triples:
+        if len(item) == 3:
+            turn, _track, label = item
+        elif len(item) == 2:
+            turn, label = item
+        else:
+            raise TypeError(
+                f"unexpected diarization item {item!r} from pyannote; expected a "
+                "(segment, label) or (segment, track, label) tuple."
+            )
+        duration = float(turn.end) - float(turn.start)
+        if duration > 0:
+            segments.append(
+                Segment(speaker=str(label), start=float(turn.start), duration=duration)
+            )
+    return segments
+
+
 class PyannoteDiarizer(Diarizer):
     """Wraps a pyannote ``Pipeline`` in the :class:`~dagger.diarize.base.Diarizer` contract.
 
@@ -157,12 +203,7 @@ class PyannoteDiarizer(Diarizer):
         kwargs = {}
         if self.num_speakers is not None:
             kwargs["num_speakers"] = int(self.num_speakers)
-        annotation = pipeline(
+        output = pipeline(
             {"waveform": tensor, "sample_rate": MODEL_SAMPLE_RATE}, **kwargs
         )
-
-        return [
-            Segment(speaker=str(label), start=float(turn.start), duration=float(turn.duration))
-            for turn, _track, label in annotation.itertracks(yield_label=True)
-            if turn.duration > 0
-        ]
+        return _to_segments(output)

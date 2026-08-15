@@ -76,7 +76,7 @@ embedding / mean embedding · `G` extractor · `ε_i` extraction error · `M_i` 
 
 | Module | Tool / model | Notes |
 |---|---|---|
-| Diarization | **pyannote.audio 4.0.x + `community-1`** | Gated on HF (free). Ungated fallback: NeMo Sortformer. |
+| Diarization | **pyannote.audio 4.0.x + `community-1`** (full repo id: `pyannote/speaker-diarization-community-1`) | Gated on HF (free); token in `DAGGER_HF_TOKEN`. The short name `pyannote/community-1` is NOT a real repo and 404s. Its 4.x pipeline returns a `DiarizeOutput`, and you must read `.speaker_diarization` — **never** `.exclusive_speaker_diarization`, which allows at most one speaker per instant and would silently delete every overlap. Ungated fallback: NeMo Sortformer. |
 | Speaker encoder `φ` | **NVIDIA NeMo TitaNet-Large** (`nvidia/speakerverification_en_titanet_large`) | Freeze pretrained weights first; fine-tune late. Revised from the original WeSpeaker+ReDimNet2 pick during Phase 1 planning: consolidates with NeMo Sortformer (the diarizer fallback below) on one framework. Checkpoint is CC-BY-4.0 (attributed in `NOTICE`); toolkit is Apache-2.0. |
 | **Eval-only** encoder | `microsoft/wavlm-base-plus-sv` via `transformers` | MUST differ from `φ` — chosen over Kiwano for a simple pip-installable path; architecturally unrelated to TitaNet. |
 | Extractor `G` | **TF-GridNet + cross-attention fusion**, original implementation from the published architecture (informed by the USEF-TSE paper, arXiv:2409.02615) | Not vendored from USEF-TSE (CC-BY-NC 4.0, incompatible with this repo's Apache-2.0) or WeSep (no license file). Conv-TasNet+FiLM fast baseline was skipped in favor of building this directly. |
@@ -1241,6 +1241,34 @@ recorded rather than fixed, because Phase 3 cannot vary them: LibriMix's synthet
 boundaries, no reverb, no turn-taking) makes this gap a **lower bound** on the real-corpora gap
 Phase 4 will see; and the resampler fallback warning exists so a future corpus without
 `mixture_hi` cannot silently reintroduce band-limited diarizer input.
+
+**FIRST KAGGLE ATTEMPT (2026-08-15): the A5 refactor guard PASSED on real data; three
+environment/API defects found and fixed; no Phase 3 numbers yet.**
+
+1. **A5 guard passed — byte-identical.** `run_phase2.py` against
+   `configs/phase2/dod/phase2_librimix_3spk_eval_scratch.yaml` with the clip50 checkpoint
+   reproduced the committed `phase2_librimix_3spk_scratch345clip50.csv` **byte for byte**, so
+   moving `score_scene` into `dagger/eval/systems.py` is now verified against the corpus, not
+   just synthetically. This box is checked; do not spend another ~29 min on it unless
+   `dagger/eval/` or `run_phase2.py` changes.
+2. **The model id in the configs was wrong.** `pyannote/community-1` 404s; the real repo is
+   **`pyannote/speaker-diarization-community-1`**. It fooled a pre-flight that constructed
+   `PyannoteDiarizer()` with no argument (picking up the corrected `DEFAULT_MODEL`) while the
+   run read `diarizer.model` from the config — so the check passed and the run failed.
+   Both `configs/phase3/**` files now carry the full id.
+3. **pyannote 4.x returns `DiarizeOutput`, not `Annotation`** — `output.itertracks(...)` raises
+   `AttributeError`. `dagger/diarize/pyannote_diarizer.py::_to_segments` now unwraps
+   defensively (wrapper or bare annotation; 2- or 3-tuples). **It reads
+   `.speaker_diarization` and must NEVER read `.exclusive_speaker_diarization`**: the exclusive
+   variant allows at most one speaker per instant, so taking it would silently delete every
+   overlap — the overlap mask would collapse, `G` would barely run, `overlap_recall` would read
+   ~0, and the run would produce a complete, wrong results table rather than an error. Pinned by
+   `tests/phase3/test_pyannote_output.py` (357 passed).
+4. **Kaggle in-kernel numpy breaks after the pip installs.** `pip install -U numba numba-cuda`
+   then `.[diarize]` leaves numpy mixed on disk, so a lazily-imported submodule (`numpy.char`
+   via `scipy.signal`) mismatches the numpy already in memory from `import torch`. Subprocesses
+   are fine — the 25-min `run_phase2.py` eval ran through the same import. **Notebook rule: do
+   Phase 3 work via `!python`, never in-kernel.** Kaggle batch cannot restart the kernel.
 
 *Stage B (not started).* Mask augmentation in `build_scene_crop_dataset`'s `_prepare` (not
 `__getitem__` — `_prepare` is where enrollment happens, so augmenting there contaminates

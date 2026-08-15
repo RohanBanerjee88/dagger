@@ -36,7 +36,9 @@ dataset:
 
 diarizer:
   name: pyannote
-  model: pyannote/community-1
+  # The FULL repo id. The pipeline is called "community-1" in prose (and in
+  # CLAUDE.md §3), but `pyannote/community-1` is not a real repo and 404s.
+  model: pyannote/speaker-diarization-community-1
   # 'oracle' is mandatory (guardrail §6.2). The other three each vary exactly one
   # thing -- see scripts/run_phase3.py's docstring for the decomposition.
   arms: [oracle, real, real_forced_m, real_index_order]
