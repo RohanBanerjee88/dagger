@@ -30,7 +30,7 @@ from dagger.diarize.oracle import Segment
 
 #: HF model id, per CLAUDE.md §3. Gated (free) — accept the terms on the model
 #: page and put a token in DAGGER_HF_TOKEN.
-DEFAULT_MODEL = "pyannote/community-1"
+DEFAULT_MODEL = "pyannote/speaker-diarization-community-1"
 
 #: What ``community-1`` expects.
 MODEL_SAMPLE_RATE = 16000
