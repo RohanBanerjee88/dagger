@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dagger.data import build_dataset
 from dagger.data.paths import load_env
+from dagger.diarize.base import DiarizationFailedError
 from dagger.diarize.mapping import map_clusters_to_speakers
 from dagger.diarize.oracle import OracleDiarizer
 from dagger.diarize.regions import scene_regions
@@ -167,6 +168,7 @@ def score_scene_all_arms(
     gate_cfg: dict,
     refine_rounds: int,
     diarizer_cache: dict,
+    arm_failures: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Run every arm over one scene. Returns ``(score, gate, diarization)`` rows.
 
@@ -198,7 +200,23 @@ def score_scene_all_arms(
                 diarizer = diarizer_cache[cache_key]
             else:
                 diarizer = OracleDiarizer()
-            regions_cache[key] = scene_regions(scene, diarizer)
+            try:
+                regions_cache[key] = scene_regions(scene, diarizer)
+            except DiarizationFailedError as exc:
+                # Skip THIS ARM on THIS SCENE, not the whole scene. A forced
+                # speaker count is unsatisfiable on a scene whose segmentation
+                # yields fewer embedding windows than m -- and `real_forced_m`
+                # is a diagnostic arm, so letting it discard the scene would
+                # cost the headline `real - oracle` comparison a row for a
+                # reason that has nothing to do with either of them.
+                #
+                # Paired comparisons intersect on keys, so they simply use the
+                # rows that exist; `n` is reported per row in the gap table, so
+                # a thinner forced-m comparison is visible rather than silent.
+                if arm_failures is not None:
+                    arm_failures[arm] = arm_failures.get(arm, 0) + 1
+                print(f"[diarize] scene {scene.name!r}: skipping arm {arm!r} -- {exc}")
+                continue
         regions = regions_cache[key]
 
         rows, gates = score_scene(
@@ -355,6 +373,8 @@ def _write_results(
     out_dir: Path,
     stem: str,
     arms: list[str],
+    arm_failures: dict | None = None,
+    n_scenes: int | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / f"{stem}.csv"
@@ -396,6 +416,23 @@ def _write_results(
                 )
                 cells.append(f"{float(np.mean(values)):.2f}" if values else "n/a")
             lines.append(f"| {arm} | {system_name} | " + " | ".join(cells) + " |")
+
+    if arm_failures:
+        # An arm that could not run on many scenes is a thinner comparison than
+        # the others, and the reader must see that BEFORE the gap table rather
+        # than infer it from a smaller `n`.
+        lines += [
+            "", "## Arm coverage", "",
+            "Scenes where an arm could not be computed (arm skipped, scene kept for",
+            "the others). A forced speaker count is unsatisfiable when the pipeline's",
+            "segmentation yields fewer embedding windows than `m`.", "",
+            "| arm | scenes failed | of | % |", "|---|---|---|---|",
+        ]
+        for arm in arms:
+            count = arm_failures.get(arm, 0)
+            total = n_scenes if n_scenes else 0
+            pct = f"{100.0 * count / total:.0f}%" if total else "n/a"
+            lines.append(f"| {arm} | {count} | {total} | {pct} |")
 
     lines += _diar_section(diar_rows, arms)
     lines += _gap_section(rows, arms, depths)
@@ -474,6 +511,7 @@ def main() -> int:
     diar_rows: list[dict] = []
     skipped: list[tuple[str, str]] = []
     diarizer_cache: dict = {}
+    arm_failures: dict[str, int] = {}
     for scene in dataset:
         try:
             scene_rows, scene_gate_rows, scene_diar_rows = score_scene_all_arms(
@@ -482,6 +520,7 @@ def main() -> int:
                 enroll_budget_ms=enroll_budget_ms, encoder=encoder,
                 extractor=extractor, gate_cfg=gate_cfg,
                 refine_rounds=refine_rounds, diarizer_cache=diarizer_cache,
+                arm_failures=arm_failures,
             )
         except NoSoloRegionError as exc:
             # Benign and expected under real diarization: a predicted cluster may
@@ -502,6 +541,15 @@ def main() -> int:
             f"[enroll] skipped {len(skipped)}/{len(dataset)} scenes during enrollment "
             f"(see per-scene messages above): {[name for name, _ in skipped]}"
         )
+    if arm_failures:
+        print("\n[diarize] per-arm scene failures (arm skipped, scene kept):")
+        for arm, count in sorted(arm_failures.items()):
+            pct = 100.0 * count / max(1, len(dataset))
+            print(f"    {arm}: {count}/{len(dataset)} scenes ({pct:.0f}%)")
+        print(
+            "    An arm that failed on a large fraction of scenes is not a usable\n"
+            "    comparison -- read its `n` in the gap table before quoting it."
+        )
 
     n_src = cfg["dataset"].get("n_src", 2)
     stem = f"phase3_{cfg['dataset']['name']}_{n_src}spk"
@@ -509,7 +557,8 @@ def main() -> int:
     if tag:
         stem = f"{stem}_{tag}"
     results_dir = Path(cfg.get("eval", {}).get("results_dir", "results"))
-    _write_results(rows, gate_rows, diar_rows, results_dir, stem, arms)
+    _write_results(rows, gate_rows, diar_rows, results_dir, stem, arms,
+                   arm_failures=arm_failures, n_scenes=len(dataset))
     return 0
 
 

@@ -25,7 +25,7 @@ import warnings
 import numpy as np
 
 from dagger.data.paths import get_credential
-from dagger.diarize.base import Diarizer
+from dagger.diarize.base import DiarizationFailedError, Diarizer
 from dagger.diarize.oracle import Segment
 
 #: HF model id, per CLAUDE.md §3. Gated (free) — accept the terms on the model
@@ -203,7 +203,26 @@ class PyannoteDiarizer(Diarizer):
         kwargs = {}
         if self.num_speakers is not None:
             kwargs["num_speakers"] = int(self.num_speakers)
-        output = pipeline(
-            {"waveform": tensor, "sample_rate": MODEL_SAMPLE_RATE}, **kwargs
-        )
+
+        payload = {"waveform": tensor, "sample_rate": MODEL_SAMPLE_RATE}
+        if self.num_speakers is None:
+            # Free estimation: any failure here is a real problem, so let it
+            # propagate rather than quietly shrinking the eval set.
+            output = pipeline(payload)
+        else:
+            # A forced speaker count is UNSATISFIABLE on a short scene: if the
+            # pipeline's segmentation yields fewer embedding windows than
+            # `num_speakers`, its clustering raises (sklearn:
+            # "n_samples=2 should be >= n_clusters=3"). That is a property of
+            # the scene, not a bug, and it must not take down the whole run --
+            # the forced-count arm is a diagnostic, while `real` and `oracle`
+            # carry the headline. Wrapped so callers can skip THIS ARM on THIS
+            # SCENE and keep everything else.
+            try:
+                output = pipeline(payload, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - narrowed by the branch above
+                raise DiarizationFailedError(
+                    f"pyannote could not diarize with num_speakers="
+                    f"{self.num_speakers}: {type(exc).__name__}: {exc}"
+                ) from exc
         return _to_segments(output)

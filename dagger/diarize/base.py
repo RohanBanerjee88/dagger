@@ -41,6 +41,24 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from dagger.diarize.oracle import Segment
 
 
+class DiarizationFailedError(RuntimeError):
+    """A diarizer could not produce a result for this scene.
+
+    The benign, expected-to-happen-sometimes failure — the diarization analogue
+    of :class:`~dagger.enroll.topk.NoSoloRegionError`. Callers may legitimately
+    catch *this specific type* to skip one arm on one scene and continue.
+
+    The motivating case is a forced speaker count: asking for ``num_speakers=m``
+    when the pipeline's internal segmentation yielded fewer embedding windows
+    than ``m`` is unsatisfiable, and its clustering raises. That is a property of
+    the scene being short, not a bug.
+
+    Deliberately NOT raised for free-estimation diarization, where any failure
+    means something is actually wrong and must propagate loudly rather than
+    quietly shrinking the eval set.
+    """
+
+
 class Diarizer(abc.ABC):
     """Produce speaker-active spans for one scene.
 
