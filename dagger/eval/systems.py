@@ -29,7 +29,7 @@ from __future__ import annotations
 import numpy as np
 
 from dagger.audio.provenance import original_mixture
-from dagger.diarize.oracle import overlap_mixture
+from dagger.diarize.oracle import overlap_depth, overlap_mixture
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.gate.confidence import confidence_gate
 from dagger.metrics.sisdr import si_sdr_by_depth
@@ -194,17 +194,38 @@ def score_scene(
         )
 
     activity, speakers = regions.activity, regions.speakers
-    solo, overlap, depth = regions.solo, regions.overlap, regions.depth
+    solo, overlap = regions.solo, regions.overlap
 
     x = original_mixture(scene.mixture, label="x")
     x_O = overlap_mixture(x, overlap, label="x_O")
 
-    # Attribute each predicted row to a ground-truth source BEFORE anything is
-    # scored. Under oracle regions this is the identity; under real ones it is
-    # the optimal cluster mapping. Nothing below feeds it back into the audio
-    # path -- it only decides what each output is compared against.
-    targets = _score_targets(scene, regions)
+    # Ground truth enters here, and ONLY for scoring. Two uses, both strictly
+    # after every waveform is produced, neither reaching the audio path:
+    #
+    #  * `targets`        -- which clean source each output row is compared
+    #                        against (identity under oracle regions; the optimal
+    #                        cluster mapping under real ones).
+    #  * `scoring_depth`  -- which bucket each sample's score is reported in.
+    #
+    # `scoring_depth` comes from the REFERENCE, never from `regions.depth`.
+    # Depth is defined as intrinsic difficulty (CLAUDE.md §6.4) -- a property of
+    # the acoustic scene, not of the diarizer's opinion about it. Bucketing by
+    # predicted depth lets a diarizer grade itself on a curve it drew: merge
+    # three concurrent speakers into one cluster and every sample of a genuine
+    # 3-way overlap gets filed under "depth 1", the easy row. It also breaks the
+    # cross-arm pairing, since `depth 2` would then name a different set of
+    # samples in each arm and their difference would not be a controlled
+    # comparison. Same principle as DER's denominator, which is reference
+    # speech (`dagger.metrics.der`), not predicted speech.
+    #
+    # This does NOT hand the method the speaker count. The audio path below runs
+    # entirely on `activity`/`solo`/`overlap` from the diarizer, and the number
+    # of output tracks is still whatever it found.
+    reference_activity = _reference_activity(scene)
+    scoring_depth = overlap_depth(reference_activity)
+    targets = _score_targets(scene, regions, reference_activity)
 
+    n_clusters = int(activity.shape[0])  # before any enrollment drop
     kept: list[int] = []
     enrollments = []
     for i in range(len(speakers)):
@@ -288,7 +309,7 @@ def score_scene(
                 # nothing to score it against. Reported as a spurious cluster in
                 # the diarization diagnostics, not silently dropped.
                 continue
-            by_depth = si_sdr_by_depth(system_outputs[i], target, depth)
+            by_depth = si_sdr_by_depth(system_outputs[i], target, scoring_depth)
             for k, score in by_depth.items():
                 rows.append({
                     "scene": scene.name,
@@ -302,6 +323,13 @@ def score_scene(
                     # Provenance, Phase 3 only. run_phase2.py's writer ignores
                     # extra keys, so the Phase 2 CSV schema is untouched.
                     "cluster": cluster,
+                    # How many clusters the diarizer produced, BEFORE the
+                    # enrollment drop. `m` is the count that survived, so the
+                    # pair tells the whole story: n_clusters=2 with m=1 means
+                    # one cluster had no solo region and could not be enrolled.
+                    # Reading that off the 2026-08-16 run took a forensic pass
+                    # over the CSV; it belongs in the table.
+                    "n_clusters": n_clusters,
                     "system": system_name,
                     "m": num_speakers,
                     "depth": k,
@@ -354,7 +382,9 @@ def score_scene(
     return rows, gate_rows
 
 
-def _score_targets(scene, regions) -> list[tuple[str | None, np.ndarray | None]]:
+def _score_targets(
+    scene, regions, reference_activity=None
+) -> list[tuple[str | None, np.ndarray | None]]:
     """``(ground-truth label, source)`` for each *output* row, ``(None, None)`` if
     the row cannot be attributed to any ground-truth speaker.
 
@@ -374,7 +404,9 @@ def _score_targets(scene, regions) -> list[tuple[str | None, np.ndarray | None]]
 
     from dagger.diarize.mapping import map_clusters_to_speakers
 
-    mapping = map_clusters_to_speakers(regions.activity, _reference_activity(scene))
+    if reference_activity is None:
+        reference_activity = _reference_activity(scene)
+    mapping = map_clusters_to_speakers(regions.activity, reference_activity)
     return [
         (None, None) if ref is None else (scene.speakers[ref], scene.sources[ref])
         for ref in mapping.cluster_to_ref

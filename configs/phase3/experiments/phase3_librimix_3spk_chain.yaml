@@ -1,0 +1,88 @@
+# Phase 3 Stage A on CHAIN placement -- conversation-like geometry.
+#
+# WHY THIS EXISTS. The 2026-08-16 scheduled-placement run collapsed: pyannote
+# returned 2 clusters per scene, one of them nested entirely inside the other
+# (never predicted-solo, so unenrollable), leaving a ONE-speaker reconstruction
+# in 149/150 scenes. All four systems then produced identical numbers because
+# there was nothing to deflate, gate or refine. The oracle-vs-real gap it
+# reported (-22.9 dB) is not a measurement of diarization cost; it is a
+# measurement of that collapse.
+#
+# The cause is geometry, not the diarizer. `schedule_solo_then_overlap` with
+# min_solo_ms: 1000 and 3 speakers gives 3 s of solo (1 s each) and then ~7 s of
+# ALL THREE talking at once -- roughly 70% of the scene at depth 3. Clustering
+# gets ~1 s of clean speech per speaker against 7 s of three-way mixture, and
+# merges. No real conversation looks like that; the scheduler was built to
+# guarantee Phase 2 its depth-3 exposure, which is a different goal.
+#
+# `placement: chain` is the Phase 0/1 geometry: utterances staggered in sequence
+# with partial overlap, so each speaker gets seconds of contiguous solo speech --
+# a lead-in and a tail -- which is what clustering needs. It reaches depth 2
+# readily and depth 3 only rarely (CLAUDE.md Phase 1 "heads-up"), so this
+# measures the diarization gap where a diarizer can actually function, rather
+# than where it cannot.
+#
+# READ THE `Cluster discovery vs. enrollment` TABLE FIRST. If `enrolled` is ~1
+# again, the geometry fix did not take and nothing below it is interpretable.
+# Healthy is enrolled ~= clusters ~= 3.
+#
+# Keep the scheduled-placement run as the deliberate hard case: "diarization
+# error costs X dB under conversation-like geometry, and the diarizer fails
+# outright under near-continuous 3-way overlap" is a better result than either
+# number alone.
+#
+#   DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_chain.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test.csv
+  n_src: 3
+  # The one variable this config changes against the DoD run.
+  placement: chain
+  overlap: 0.5
+  min_solo_ms: 1000.0
+  limit: 150
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  arms: [oracle, real, real_forced_m, real_index_order]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# Untuned Phase 2 defaults, deliberately. `max_mean_variance: 0.05` has never
+# fired: the 2026-08-16 run saw mean_variance nonzero in 57% of decisions but
+# never above 6.1e-4, i.e. ~80x below threshold. Measure again here before
+# tuning, and tune on a dev split -- never on these test scenes.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+# Phase 2 found refinement net-harmful under CLEAN enrollment (`refine.rounds: 0`
+# is the default there). Kept at 2 here because the untested regime is
+# CONTAMINATED enrollment, which is exactly what real diarization produces.
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: chain

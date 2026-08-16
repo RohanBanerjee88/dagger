@@ -92,7 +92,7 @@ DEFAULT_ARMS = ("oracle", "real", "real_forced_m", "real_index_order")
 # paired comparisons key on -- keying on the cluster id would make every
 # oracle-vs-real pair miss (oracle rows are `s1..`, real rows `SPEAKER_00..`)
 # and silently produce an empty gap table.
-PHASE3_SCORE_FIELDS = ["diarization"] + SCORE_FIELDS + ["cluster"]
+PHASE3_SCORE_FIELDS = ["diarization"] + SCORE_FIELDS + ["cluster", "n_clusters"]
 PHASE3_GATE_FIELDS = ["diarization"] + GATE_FIELDS + ["cluster"]
 
 DIAR_FIELDS = [
@@ -333,6 +333,49 @@ def _diar_section(diar_rows: list[dict], arms: list[str]) -> list[str]:
     return lines
 
 
+def _enrollment_section(rows: list[dict], arms: list[str]) -> list[str]:
+    """How many clusters the diarizer found vs. how many survived enrollment.
+
+    These are different numbers and the difference is load-bearing. A cluster
+    with no *predicted-solo* region cannot be enrolled and is dropped, and a real
+    diarizer produces such clusters routinely -- one nested entirely inside
+    another speaker's speech, say. On 2026-08-16 that silently reduced a
+    3-speaker scene to a ONE-speaker reconstruction in 149/150 scenes, which made
+    all four systems identical (nothing to deflate, gate, or refine) and cost a
+    whole run to diagnose from the raw CSV.
+
+    `m == 1` here is the alarm: with one track there is no system comparison
+    left, whatever the SI-SDR column says.
+    """
+    lines = [
+        "", "## Cluster discovery vs. enrollment", "",
+        "`clusters` is what the diarizer produced; `enrolled` (the `m` column) is",
+        "how many survived enrollment. A cluster with no predicted-solo region",
+        "cannot be enrolled and is dropped. If `enrolled` is 1, that arm is a",
+        "single-speaker system and its system comparisons are vacuous.", "",
+        "| arm | scenes | clusters (mean) | enrolled (mean) | dropped | scenes with enrolled=1 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for arm in arms:
+        per_scene: dict[str, tuple[int, int]] = {}
+        for r in rows:
+            if r["diarization"] != arm:
+                continue
+            per_scene[r["scene"]] = (int(r["n_clusters"]), int(r["m"]))
+        if not per_scene:
+            continue
+        clusters = [c for c, _ in per_scene.values()]
+        enrolled = [m for _, m in per_scene.values()]
+        dropped = sum(c - m for c, m in per_scene.values())
+        degenerate = sum(1 for m in enrolled if m <= 1)
+        flag = "  **<- degenerate**" if degenerate > len(enrolled) // 2 else ""
+        lines.append(
+            f"| {arm} | {len(per_scene)} | {np.mean(clusters):.2f} | "
+            f"{np.mean(enrolled):.2f} | {dropped} | {degenerate}{flag} |"
+        )
+    return lines
+
+
 def _gate_section(gate_rows: list[dict], arms: list[str]) -> list[str]:
     """Gate decisions per arm, broken out BY REASON.
 
@@ -489,6 +532,7 @@ def _write_results(
             lines.append(f"| {arm} | {count} | {total} | {pct} |")
 
     lines += _diar_section(diar_rows, arms)
+    lines += _enrollment_section(rows, arms)
     lines += _gate_section(gate_rows, arms)
     lines += _gap_section(rows, arms, depths)
     lines += _ordering_section(rows, arms, depths)
