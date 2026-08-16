@@ -58,6 +58,7 @@ def refine_embeddings(
     *,
     rounds: int = 2,
     fade: int = 0,
+    min_clip_ms: float = 50.0,
     tau_margin: float,
     max_mean_variance: float,
     min_vad_coverage: float,
@@ -94,10 +95,24 @@ def refine_embeddings(
     caller can tell "the gate rubber-stamped everything from round 0" apart
     from "refinement degraded progressively"), or ``None`` when that speaker
     had no overlap-only region to re-embed from that round.
+
+    ``min_clip_ms`` is the shortest overlap run that will be re-embedded. It is
+    a floor for what the speaker encoder can physically process (below about one
+    mel frame TitaNet raises), NOT the 500 ms *stability* threshold enrollment
+    applies. Runs below it yield a rejected ``GateResult`` with reason
+    ``"overlap_clip_too_short"``, distinct from the ``None`` used for "no
+    overlap-only region at all" -- under real diarization those two are
+    different failures and the difference is informative.
     """
     num_speakers = activity.shape[0]
     embeddings = np.array(initial_embeddings, dtype=np.float64, copy=True)
     round_results: list[list[GateResult | None]] = []
+    # A technical floor for the ENCODER, not a quality threshold: below roughly
+    # one mel frame the speaker encoder cannot produce an embedding at all. The
+    # 500 ms stability floor that enrollment uses (`select_topk_solo_clips`) is
+    # a different, stricter judgement and is deliberately not reused here --
+    # raising this value silently changes which speakers get refined at all.
+    min_samples = max(1, int(round(min_clip_ms / 1000.0 * sample_rate)))
 
     for _round in range(rounds):
         outputs = reconstruct_all(x, x_O, activity, solo, embeddings, extractor, fade=fade)
@@ -110,6 +125,29 @@ def refine_embeddings(
             if run is None:
                 continue
             start, end = run
+            if (end - start) < min_samples:
+                # Too short to re-embed. Under ORACLE diarization this never
+                # fires -- the scene scheduler gives every speaker a long
+                # overlap tail -- but a real diarizer's boundaries are jittery,
+                # and an overlap-only run of a few samples is routine. TitaNet
+                # then gets fewer samples than one mel frame and NeMo raises
+                # ("normalize_batch ... received a tensor of length 1"), which
+                # took down a whole Phase 3 run at scene 9 of 150.
+                #
+                # Recorded with its OWN reason rather than reusing
+                # "no_overlap_clip": "this speaker never overlapped anyone" and
+                # "this speaker's overlap was too brief to use" are different
+                # facts about the diarization, and collapsing them would hide
+                # how much refinement real boundary jitter actually costs.
+                round_results[-1][i] = GateResult(
+                    accepted=False,
+                    margin=float("nan"),
+                    vad_coverage=float("nan"),
+                    artifact_score=float("nan"),
+                    reason="overlap_clip_too_short",
+                    mean_variance=float("nan"),
+                )
+                continue
             clip = outputs[i][start:end]
 
             raw_embedding = encoder.embed(clip, sample_rate)

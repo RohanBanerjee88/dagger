@@ -333,6 +333,60 @@ def _diar_section(diar_rows: list[dict], arms: list[str]) -> list[str]:
     return lines
 
 
+def _gate_section(gate_rows: list[dict], arms: list[str]) -> list[str]:
+    """Gate decisions per arm, broken out BY REASON.
+
+    Two things this phase must be able to see, neither visible from an accept
+    rate alone:
+
+    * ``enrollment_variance`` firing at all. `V_i` has been exactly 0.0 in every
+      run this project has ever done, so a nonzero count here is the first time
+      the enrollment gate has ever done anything.
+    * ``overlap_clip_too_short``. Under real diarization a predicted
+      overlap-only run can be a few samples, which refinement must skip. Folding
+      that into the rejection count would report boundary jitter as if the gate
+      had judged the audio and found it wanting.
+    """
+    lines = [
+        "", "## Gate decisions (per arm x system, by reason)", "",
+        "| arm | system | decisions | accepted | " + " | ".join(
+            ["margin", "variance (V_i)", "vad", "artifact", "too short", "no clip"]
+        ) + " |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    reasons = ["margin", "enrollment_variance", "vad_coverage", "artifact_score",
+               "overlap_clip_too_short", "no_overlap_clip"]
+    for arm in arms:
+        for system_name in ("gated_deflation", "coarse_to_fine"):
+            subset = [r for r in gate_rows
+                      if r["diarization"] == arm and r["system"] == system_name]
+            if not subset:
+                continue
+            accepted = sum(1 for r in subset if r["accepted"] is True)
+            counts = [sum(1 for r in subset if r["reason"] == reason) for reason in reasons]
+            rate = f"{accepted} ({100.0 * accepted / len(subset):.0f}%)"
+            lines.append(
+                f"| {arm} | {system_name} | {len(subset)} | {rate} | "
+                + " | ".join(str(c) for c in counts) + " |"
+            )
+
+    variance_fired = sum(1 for r in gate_rows if r["reason"] == "enrollment_variance")
+    values = [float(r["mean_variance"]) for r in gate_rows
+              if r["mean_variance"] not in (None, "", "None")
+              and not np.isnan(float(r["mean_variance"]))]
+    nonzero = sum(1 for v in values if v > 0)
+    lines += [
+        "", f"`V_i` rejections: **{variance_fired}**; `mean_variance` nonzero in "
+        f"**{nonzero}/{len(values)}** decisions"
+        + (f", max {max(values):.3g}" if values else ""),
+        "",
+        "`V_i` has been structurally 0 in every prior run (one solo run -> one clip",
+        "-> variance over a single sample). A nonzero count above is the first time",
+        "the enrollment-variance check has had anything to measure.",
+    ]
+    return lines
+
+
 def _ordering_section(rows: list[dict], arms: list[str], depths: list[int]) -> list[str]:
     """Does the Phase 2 ordering survive real diarization?
 
@@ -435,6 +489,7 @@ def _write_results(
             lines.append(f"| {arm} | {count} | {total} | {pct} |")
 
     lines += _diar_section(diar_rows, arms)
+    lines += _gate_section(gate_rows, arms)
     lines += _gap_section(rows, arms, depths)
     lines += _ordering_section(rows, arms, depths)
 

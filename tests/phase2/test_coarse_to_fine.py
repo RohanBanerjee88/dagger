@@ -87,7 +87,17 @@ class TestGateIsNotSelfReferential:
     its accept rate stops responding to estimate quality at all.
     """
 
-    _gate_kwargs = dict(tau_margin=0.0, max_mean_variance=1.0, min_vad_coverage=0.0, max_artifact_score=10.0)
+    # min_clip_ms=0.0 disables refine_embeddings' encoder-length floor. `_scene()`
+    # is a 5-SAMPLE toy (0.6 ms at 8 kHz) built to exercise blend algebra and gate
+    # wiring against a FakeSpeakerEncoder that accepts any length; the floor exists
+    # for the real encoder, which cannot embed less than about one mel frame.
+    # Without this the overlap runs fall under the floor, every speaker is skipped,
+    # and these tests stop testing what they were written to test -- one of them
+    # silently, since a skip records accepted=False just as a rejection does.
+    _gate_kwargs = dict(
+        tau_margin=0.0, max_mean_variance=1.0, min_vad_coverage=0.0,
+        max_artifact_score=10.0, min_clip_ms=0.0,
+    )
 
     def test_gate_receives_the_current_embedding_not_the_blend(self, monkeypatch, fake_encoder):
         x, x_O, activity, solo = _scene()
@@ -139,7 +149,17 @@ class TestGateIsNotSelfReferential:
 
 
 class TestRefineEmbeddingsAcceptReject:
-    _gate_kwargs = dict(tau_margin=0.0, max_mean_variance=1.0, min_vad_coverage=0.0, max_artifact_score=10.0)
+    # min_clip_ms=0.0 disables refine_embeddings' encoder-length floor. `_scene()`
+    # is a 5-SAMPLE toy (0.6 ms at 8 kHz) built to exercise blend algebra and gate
+    # wiring against a FakeSpeakerEncoder that accepts any length; the floor exists
+    # for the real encoder, which cannot embed less than about one mel frame.
+    # Without this the overlap runs fall under the floor, every speaker is skipped,
+    # and these tests stop testing what they were written to test -- one of them
+    # silently, since a skip records accepted=False just as a rejection does.
+    _gate_kwargs = dict(
+        tau_margin=0.0, max_mean_variance=1.0, min_vad_coverage=0.0,
+        max_artifact_score=10.0, min_clip_ms=0.0,
+    )
 
     def _initial_embeddings_and_variances(self):
         embeddings = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -209,7 +229,7 @@ class TestAudioAlwaysComesFromXOAcrossRounds:
         refine_embeddings(
             x, x_O, activity, solo, embeddings, variances, extractor, fake_encoder, SAMPLE_RATE,
             rounds=3, tau_margin=-10.0, max_mean_variance=10.0, min_vad_coverage=0.0,
-            max_artifact_score=100.0,
+            max_artifact_score=100.0, min_clip_ms=0.0,  # 5-sample toy scene; see above
         )
 
         assert len(extractor.calls) == 3 * 2  # 3 rounds x 2 speakers
