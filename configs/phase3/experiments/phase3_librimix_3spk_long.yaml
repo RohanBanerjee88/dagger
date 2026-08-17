@@ -1,0 +1,93 @@
+# Phase 3 Stage A on 2-MINUTE scenes -- testing scene length as the cause.
+#
+# WHY. pyannote returned ~2 clusters for 3-speaker scenes in every geometry
+# tried: scheduled/1 s solo (149/150 scenes degenerate), chain (70/150),
+# scheduled/3 s solo (42/150). Cluster count was 2.04 / 2.07 regardless, so
+# geometry only changed whether the second cluster could be enrolled -- never how
+# many speakers were found. The remaining suspect is scene LENGTH: those scenes
+# are 10-20 s, while CALLHOME (a standard diarization benchmark) is 2-5 minutes
+# and AMI is tens of minutes. We were running an order of magnitude below the
+# operating point these systems are built for.
+#
+# WHAT CHANGED. Sources are several same-speaker utterances concatenated
+# (`pathA|pathB|...`, a shape the loader already supports) to ~50 s each, giving
+# ~2-minute scenes. Build the metadata first:
+#
+#   python scripts/build_long_scene_metadata.py \
+#       --librispeech-root $DAGGER_DATA_ROOT/LibriSpeech/test-clean \
+#       --output $DAGGER_DATA_ROOT/metadata/Libri3Mix/libri3mix_test_long.csv \
+#       --n-src 3 --num-scenes 50 --per-speaker-sec 50 --overlap 0.3
+#
+# WHY `overlap: 0.3` AND NOT 0.5. Chain placement puts the middle speaker
+# between the other two, and at 0.5 its solo window closes exactly -- measured
+# 32 s / 1 s / 33 s of solo across the three speakers on a 129 s scene. That is
+# the same starvation that produced the 2-cluster failure, so 0.5 would
+# reproduce the very thing this run exists to escape. At 0.3 the same scene
+# gives 45 s / 26 s / 45 s with 25% of the scene overlapped -- still well above
+# AMI's ~10-15%, so the extractor's job stays hard.
+#
+# COST. Runtime scales with audio duration, so 50 two-minute scenes is roughly
+# the wall time of 150 twenty-second ones. 50 x 3 speakers x 3 depths is still
+# ~450 scored rows, comparable to the runs above.
+#
+# READ FIRST, in this order:
+#   1. `Cluster discovery vs. enrollment` -- healthy is clusters ~= enrolled ~= 3.
+#      If clusters is still ~2, scene length was NOT the cause and the next
+#      suspect is the corpus itself (read speech, no turn-taking), which points
+#      at Phase 4 rather than another LibriMix variant.
+#   2. `Diarization quality` -- DER and overlap_recall.
+#   3. Only then the gap tables.
+#
+#   DAGGER_DATA_ROOT=/mnt/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_long.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  # MUST stay < 0.5 -- see the header. Keep in sync with the --overlap passed to
+  # build_long_scene_metadata.py, which only uses it to predict scene length.
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 50
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  arms: [oracle, real, real_forced_m, real_index_order]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# Untuned Phase 2 defaults. `max_mean_variance: 0.05` has still never fired:
+# across both 2026-08-16 runs `mean_variance` was nonzero in ~53% of decisions
+# but never exceeded 5.9e-4, roughly 100x below the threshold. Treat V_i as a
+# measured negative result, not a knob awaiting tuning.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: long2min
