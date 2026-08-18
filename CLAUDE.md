@@ -124,7 +124,7 @@ dagger/
 > done" is green. Each phase says what to build, how to know it worked, and what a screw-up
 > looks like.
 
-### ☐ Phase 0 — Plumbing (no learning yet)
+### ☑ Phase 0 — Plumbing (no learning yet) — DoD MET 2026-07-03
 
 **Goal:** data flows end to end with *oracle* diarization, and metrics compute.
 
@@ -140,6 +140,22 @@ or sample-rate/framerate misalignment between diarization masks and audio frames
 
 **Definition of done:** one command runs mixture → (oracle regions) → copied-solo output →
 metrics, on a handful of files, with sane numbers.
+
+**Status (marked complete 2026-08-18, retroactively).** Landed in `c8312aa` (2026-07-03) with
+`scripts/run_phase0.py` + `configs/phase0/dod/phase0_{librimix,wsj0mix}.yaml` and six test modules
+(`tests/phase0/`). The box went unticked for a year of project time purely as bookkeeping — every
+later phase is built on this path and could not have produced its numbers if it were wrong.
+
+*The DoD criterion is met, and later runs measure it continuously.* "Copying solo regions recovers
+solo audio exactly" shows up directly as `+inf` SI-SDR rows (a perfect estimate has zero error
+energy): the Phase 3 long-scene oracle arm produced **792 `+inf` rows**, and its depth-1 mean is
+**47.62 dB** with `±inf` clipped to ±50. That is the Phase 0 guarantee being re-verified on real
+data every time a later phase runs, which is stronger evidence than a one-off Phase 0 table.
+
+*One deviation from §7 worth knowing:* `run_phase0.py` prints to stdout and writes no CSV/`.md`, so
+unlike Phases 1-3 there is no committed `results/phase0/`. The command is reproducible; its output
+was never captured. Not worth fixing retroactively — the `+inf` evidence above supersedes it — but
+do not go looking for a results file that does not exist.
 
 ### ☑ Phase 1 — Identity conditioning (validates: targeting beats blind separation) — DoD MET 2026-07-13
 
@@ -1270,12 +1286,244 @@ environment/API defects found and fixed; no Phase 3 numbers yet.**
    are fine — the 25-min `run_phase2.py` eval ran through the same import. **Notebook rule: do
    Phase 3 work via `!python`, never in-kernel.** Kaggle batch cannot restart the kernel.
 
-*Stage B (not started).* Mask augmentation in `build_scene_crop_dataset`'s `_prepare` (not
-`__getitem__` — `_prepare` is where enrollment happens, so augmenting there contaminates
-enrollment realistically, which is what actually exercises `V_i`; note `w_overlap` is precomputed
-from clean masks and must be recomputed). Then `scripts/tune_gate.py` on the dev split (it already
-implements the literal DoD check, `_contaminated_mask`), thresholds frozen and applied unchanged.
-Then the 2x2: {baseline ckpt, mask-augmented ckpt} x {oracle, real}.
+**STAGE A RESULT (2026-08-18): the oracle-vs-real gap is measured. Scene LENGTH was the cause of
+every earlier collapse -- not geometry, not the diarizer.** `configs/phase3/experiments/phase3_librimix_3spk_long.yaml`,
+50 two-minute scenes, chain placement at `overlap: 0.3`, checkpoint
+`checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt` (unchanged, no retraining).
+
+#### Why four runs were needed to get one number
+
+pyannote returned ~2 clusters for 3-speaker scenes in every SHORT geometry, and the cluster count
+did not move with geometry at all -- only the drop rate did:
+
+| corpus | scene | clusters | enrolled | degenerate (m=1) | DER |
+|---|---|---|---|---|---|
+| scheduled, 1 s solo (2026-08-16) | ~10 s | ~2.0 | 1.00 | 149/150 | 0.309 |
+| chain (2026-08-16) | ~20 s | 2.04 | 1.57 | 70/150 | 0.309 |
+| scheduled, 3 s solo (2026-08-16) | ~19 s | 2.07 | 1.80 | 42/150 | 0.332 |
+| **chain, 2 min (2026-08-18)** | **~120 s** | **3.00** | **3.00** | **0/50** | **0.113** |
+
+The first three are NOT usable measurements: with `m=1` there is nothing to deflate, gate or
+refine, so all four systems collapse onto one another and every "gap" is really the cost of losing
+a speaker outright. Standard diarization benchmarks run minutes (CALLHOME 2-5 min, AMI tens of
+minutes); at 10-20 s we were an order of magnitude below the operating point pyannote is built for.
+`scripts/build_long_scene_metadata.py` concatenates consecutive same-speaker utterances
+(`pathA|pathB|...`, a shape the loader already supported) to reach it.
+
+**`overlap: 0.3`, never 0.5.** Chain places the middle speaker between the other two, and at 0.5
+its solo window closes *exactly* -- measured 32 s / 1 s / 33 s of solo on a 129 s scene. That is the
+same starvation, so a long-scene run at 0.5 reproduces the failure it was built to escape. At 0.3:
+45 s / 26 s / 45 s, 25% of the scene overlapped. `build_long_scene_metadata.py` refuses `>= 0.5`
+for 3+ speakers.
+
+#### The numbers (50 scenes, 4800 paired rows, all four arms at clusters = enrolled = 3.00)
+
+Absolute SI-SDR, and the paired gap (`real - oracle`, matched on scene/speaker/depth/system):
+
+| system | oracle d1 | oracle d2 | real d1 | real d2 | gap d1 | gap d2 |
+|---|---|---|---|---|---|---|
+| no_recursion | 47.62 | 1.73 | 38.47 | -1.38 | -9.16 +-1.04 | **-3.11 +-0.21** |
+| ungated_deflation | 46.71 | 0.24 | 38.47 | -1.96 | -8.25 +-1.07 | -2.20 +-0.23 |
+| gated_deflation | 46.71 | 0.24 | 38.47 | -1.95 | -8.25 +-1.07 | -2.20 +-0.23 |
+| coarse_to_fine | 47.70 | 1.04 | 38.47 | -1.87 | -9.23 +-1.04 | -2.92 +-0.23 |
+
+Win rates 9-24% with `|t|` 7.7-14.8: the real arm loses *consistently*, not through a few
+catastrophic scenes. That is the opposite of Phase 1's +2.35 dB at a 50% win rate, and it means
+the mean is describing the typical row.
+
+Diarization quality: **DER 0.113** = miss 0.105 + false alarm 0.000 + confusion 0.008,
+`overlap_recall` 0.758, zero missed speakers, zero spurious clusters.
+
+**Depth 3 does not exist in this corpus.** Chain at overlap 0.3 makes s1 and s3 disjoint, so the
+table stops at depth 2. Getting long scenes AND depth 3 needs scheduled placement with a long solo
+zone (e.g. `per-speaker 60 s` with `min_solo_ms: 15000` -> 45 s solo zone + ~45 s of genuine 3-way
+overlap) -- a metadata + config change, no new code. Not run.
+
+#### What the gap is made of: the ACTIVITY masks, not the deflation order
+
+Settled directly from the arms, not inferred:
+
+* `no_recursion` takes **no deflation order at all**, and its gap is the LARGEST at -3.11 dB.
+* `real - real_index_order` is **exactly +0.00** for `no_recursion` and `coarse_to_fine`.
+
+So the loss is entirely attributable to the predicted masks. The mechanism is in the DER
+decomposition: `overlap_recall` 0.758 means ~24% of true overlap frames are called non-overlap, and
+in those frames the pipeline takes the **solo-copy path** -- copying the mixture verbatim instead of
+extracting, so every other speaker leaks in at full level. Miss dominates (0.105) and confusion has
+nearly vanished (0.008), which is the inverse of the short-scene profile (confusion 0.171-0.187).
+
+**The `V_i` reordering confound is ~11% of the effect, not negligible.** `real - real_index_order`
+= +0.25 dB (|t| 2.0) for both deflation systems at depth 2, against a -2.46 dB gap. Arm 4 earned
+its place; without it that 0.25 dB would sit inside the headline number unattributed. Note the
+sign: variance-ordering *flatters* the real arm, exactly as predicted when the arm was designed.
+
+#### Three results that are clean, and three cautions on reading the tables
+
+*Clean:*
+
+1. **`real_forced_m` is now IDENTICAL to `real`** -- same DER to 3 decimals, same SI-SDR to 2, +0.00
+   on all 300 paired rows. At 2 minutes pyannote picks 3 unaided, so forcing it changes nothing.
+   Not a caching artifact: the two arms use different cache keys and run the pipeline separately,
+   and `real_index_order` *does* differ, so the machinery can produce differences. **The
+   speaker-counting problem is gone, and this arm can be dropped from future long-scene runs**
+   (~25% of runtime measuring a constant).
+2. **Refinement is net-harmful under CONTAMINATED enrollment too** -- the one regime Phase 2 never
+   tested, and the reason `refine.rounds: 2` was kept on here. oracle depth 2: 1.73 -> 1.04
+   (-0.69 dB); real depth 2: -1.38 -> -1.87 (-0.49 dB). It costs *less* when diarization is
+   imperfect (paired gap -2.92 vs -3.11, i.e. 0.19 dB less degradation), so contamination does move
+   it in the predicted direction -- nowhere near enough to turn positive. `refine.rounds: 0` stays
+   the default.
+3. **Ordering holds at depth 2 in all four arms** -- but see caution 2 before quoting it.
+
+*Cautions:*
+
+1. **The gate is degenerate at 98-99% accept**, so `gated_deflation` and `ungated_deflation` are
+   the same system (oracle depth 2: 0.24 vs 0.24). The gated/ungated half of the ordering claim is
+   vacuous in this run. Same pattern as Phase 2's heterogeneous corpus (98.4% accept).
+2. Rejections are **margin only** (3 for gated, 88 for coarse_to_fine); vad, artifact and variance
+   are 0 across all 1800 decisions.
+3. **The `real - oracle` accumulation table is a biased subset.** `scripts/aggregate_phase3.py`'s
+   `_table` filters on `n_accepted_before` *before* pairing, so a speaker counts only if its
+   accumulation position matched across arms -- and under `real` the `V_i` sort reorders, so it
+   usually does not (n = 34/28/16). Under `real_index_order` the order matches oracle by
+   construction (n = 98/92/92). **Read the `real_index_order - oracle` accumulation table; the
+   `real` one is not a random sample.** Worth fixing in the script.
+
+#### `V_i` is dead -- fourth confirmation, now under HEALTHY diarization
+
+Nonzero in 1332/1800 decisions, max **0.000324** against a `max_mean_variance: 0.05` threshold
+(~150x below), **zero rejections**. The oracle arm shows 0/45 nonzero in the smoke while real shows
+42/45, so the mechanism works -- real diarization genuinely fragments enrollment into multiple
+clips -- the magnitude simply never crosses anything. This is no longer explainable as a tuning
+problem or as a consequence of degenerate scenes: it now holds with 3.00 clusters enrolled, 0
+degenerate scenes and DER 0.113.
+
+#### Absolute quality is the EXTRACTOR's operating point, not diarization's
+
+The *oracle* arm reaches only **1.73 dB at depth 2**. Whatever is wrong there was already wrong
+with perfect masks. Cause is the training budget documented in Phase 2's close-out: the curriculum
+checkpoint got ~40% of Phase 1's total steps spread across three depths, so the 3-speaker case saw
+roughly 13% of Phase 1's exposure. Phase 3 changed no training, so nothing here could have moved
+it. Do NOT read -1.38 dB as "real diarization ruins quality" -- read it as -3.11 dB below an
+already-low ceiling.
+
+#### Reproduce
+
+```
+python scripts/build_long_scene_metadata.py \
+    --librispeech-root $DAGGER_DATA_ROOT/LibriSpeech/test-clean \
+    --output $DAGGER_DATA_ROOT/metadata/Libri3Mix/libri3mix_test_long.csv \
+    --n-src 3 --num-scenes 50 --per-speaker-sec 50 --overlap 0.3
+python scripts/run_phase3.py --config configs/phase3/experiments/phase3_librimix_3spk_long.yaml
+python scripts/aggregate_phase3.py results/phase3/experiments/phase3_librimix_3spk_long2min.csv \
+    --out results/phase3/experiments/phase3_gap_long2min.md
+```
+
+---
+
+#### FOUR OUTSTANDING ITEMS (2026-08-18) -- what Stage A left open
+
+**1. The gate has never actually been tuned.** `scripts/tune_gate.py` and
+`configs/phase2/experiments/phase2_gate_tune_dev.yaml` have existed since Phase 2 and have never
+been run, because `V_i` was structurally 0 and there was nothing to sweep. Stage A produces the
+first regime where it is nonzero, so the sweep is finally meaningful -- and the point of running it
+is **to convert an inference into a measurement**: today's claim that `V_i` cannot work rests on
+"max 3.2e-4 against a 0.05 threshold", whereas `tune_gate.py` reports Youden's J against a
+deliberately contaminated-enrollment population and refuses to recommend below J = 0.1. A
+documented J ~ 0 is a far stronger negative result than small-looking numbers.
+*Two prerequisites:* (a) a **dev split** -- generate long-scene metadata from `dev-clean`, not
+`test-clean`; tuning on the 50 test scenes and then reporting them is leakage (§8), and note the
+existing dev config's `offset: 650` is stale against a `limit: 800` training run and must move to
+>= 1000; (b) remember `gate_cfg` is SHARED between `gated_deflation` and refinement, so raising
+`tau_margin` slides gated toward `no_recursion` -- the degenerate direction. In this run only
+`tau_margin` fires at all; vad, artifact and variance are inert across 1800 decisions.
+
+**2. Absolute quality is poor and it is NOT a Phase 3 problem.** Oracle depth 2 is 1.73 dB, so the
+ceiling is already low with perfect masks; this is the training-budget arithmetic in Phase 2's
+close-out (~13% of Phase 1's per-depth exposure for the 3-speaker case). Fixing it means
+retraining, which should be **bundled with Stage B's mask-augmentation run rather than spent
+separately** -- one GPU session serves both. Two things to change in that run beyond augmentation:
+train on **long** scenes (so train and eval geometry match), and restore **depth 3+**, which this
+corpus lacks because chain at overlap 0.3 makes s1 and s3 disjoint. Scheduled placement with a long
+solo zone gives both (e.g. per-speaker 60 s, `min_solo_ms: 15000` -> 45 s solo + ~45 s of true
+3-way overlap); that is a metadata + config change, no new code.
+
+**3. The low win rate is the ACTIVITY masks, and the mitigation is cheap.** Already settled from
+the arms (see the Stage A result above): `no_recursion` takes no deflation order and carries the
+largest gap, and `real - real_index_order` is exactly +0.00 for the two order-independent systems.
+The mechanism is missed overlap -- `overlap_recall` 0.758 means ~24% of true overlap frames are
+called solo, and there the pipeline **copies the mixture verbatim** instead of extracting.
+*The untested mitigation:* the costs are **asymmetric**. Calling a solo region "overlap" is mild
+(`G` runs where a copy would have done); calling an overlap region "solo" is catastrophic (a raw
+mixture is emitted as a speaker's track). So the derived overlap mask should be biased toward
+inclusion -- dilate predicted overlap by some milliseconds before building `x_O`. One config key,
+one knob, sweepable on dev, **no retraining**. If missed overlap really is the dominant cost this
+should recover a meaningful share of the 3.11 dB, and it is the cheapest open lever in the phase.
+
+**4. "Refinement is net-negative" needs a CEILING, not more repetitions.** It is now negative in
+every regime tested -- clean enrollment (Phase 2, -0.07 to -0.54 dB), heterogeneous enrollment
+(Phase 2, -0.36/-0.69), and contaminated real-diarization enrollment (Stage A, -0.49 dB). But
+"never positive" is not provable by accumulating negatives, and the mechanism explains why the
+tests keep landing negative: refinement blends `0.5*e_enrolled + 0.5*e_from_extracted_overlap`, and
+the second term is embedded from `G`'s output, currently ~1.7 dB at depth 2. For the blend to help,
+the extracted-audio embedding must beat the enrollment embedding -- but bad enrollment produces bad
+conditioning produces a bad candidate, so the two requirements fight.
+*The decisive experiment -- an ORACLE-REFINEMENT upper bound.* Run refinement but accept a
+candidate only when it is genuinely closer to the true speaker (measured against `scene.sources`
+with the **eval** encoder, §6.3). Scoring-time only, never deployable; the point is the ceiling.
+**If oracle-refinement is still net-negative, refinement has no headroom on this extractor and that
+is a publishable negative result with a stated mechanism. If it is positive but the real gate
+cannot find it, the acceptance RULE is what is broken, not refinement.** One eval pass, no
+training, and it settles which of the two we have been looking at for three phases.
+*If the ceiling turns out positive, the levers in order:* variance-weighted blend instead of the
+fixed 0.5/0.5 (already flagged in Phase 2's close-out as untested and needing no benefit test, since
+a noisy candidate down-weights itself); embed only the cleanest part of the extracted audio
+(lowest-depth frames) rather than the longest overlap run; and better `G` -- at 10-15 dB the
+extracted audio would embed near-cleanly and refinement's premise would finally hold. Current read:
+refinement is probably gated on extractor quality rather than on the update rule, but the ceiling
+run is what turns that from opinion into evidence.
+
+#### STAGE B -- full work list (not started)
+
+Ordered so that everything needing no GPU comes first, and the one training run is entered with its
+design already decided by measurement rather than by guess.
+
+*No GPU -- do these first:*
+
+1. **Overlap-dilation sweep** (item 3). New config key, dilate predicted overlap before `x_O`,
+   sweep on dev. Cheapest open lever; may not need Stage B's retrain at all.
+2. **Oracle-refinement ceiling** (item 4). One eval pass; decides whether refinement stays a
+   reported negative or becomes an engineering problem.
+3. **`tune_gate.py` on a long-scene dev split** (item 1). Produces the Youden's J number for `V_i`
+   and a defensible `tau_margin`; freeze thresholds and apply unchanged everywhere after.
+4. **Fix `aggregate_phase3._table`** so the accumulation stratification pairs before filtering --
+   today the `real - oracle` accumulation table is a biased subset (n = 34/28/16 vs 98/92/92).
+5. **Drop `real_forced_m`** from long-scene configs: identical to `real` to 3 decimals, ~25% of
+   runtime measuring a constant. Keep it in any SHORT-scene config, where counting still fails.
+6. **Move the gate-tune dev split** from `offset: 650` to `>= 1000` -- it currently overlaps rows
+   [650, 800) of the clip50 training run.
+
+*The one GPU session -- design it from the measurements above:*
+
+7. **Mask augmentation** in `build_scene_crop_dataset`'s `_prepare` (not `__getitem__`: `_prepare`
+   is where enrollment happens, so augmenting there contaminates enrollment realistically, which is
+   what exercises the whole gate path; note `w_overlap` is precomputed from clean masks and must be
+   recomputed). **Target the measured error profile, not the assumed one:** at 2-minute scenes the
+   profile is miss 0.105 / confusion 0.008, so augmentation should simulate **dropped speaker
+   activity inside overlapped regions**, NOT the label-swap and boundary-jitter mix originally
+   planned from the short-scene runs where confusion dominated (0.171-0.187).
+8. **Train on long, multi-depth scenes** (item 2) so train and eval geometry match and depth 3+
+   exists, and so the same session repairs the absolute-quality ceiling.
+9. **The 2x2:** {baseline ckpt, mask-augmented ckpt} x {oracle, real}, on the long-scene corpus.
+
+*Deferred, with reasons:*
+
+10. **Whisper WER** -- Phase 4 per §3; `dagger/metrics/__init__.py` already promises it.
+11. **Real corpora (AMI-SDM etc.)** -- Phase 4. Note the Stage A gap is NOT a clean lower bound on
+    AMI: LibriMix is easier acoustically (no reverb, hard boundaries) but its short synthetic scenes
+    were *harder* for speaker counting, and AMI gives each speaker minutes of clean speech. The
+    `Diarizer` ABC and the four-arm harness transfer directly, since AMI ships reference
+    annotations and so supports the mandatory oracle arm (§6.2).
 
 ### ☐ Phase 4 — Real corpora + full ablation
 
@@ -1353,10 +1601,13 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-08-14 — Phase 3 Stage A CODE landed (see §5 Phase 3): the diarizer
-seam, DER, cluster mapping and the 4-arm paired harness are implemented and unit-tested
-offline (350 passed), but NOTHING has run against pyannote or real data yet. Phase 2's
-DoD remains met and unaffected. Next: the Stage A smoke run, whose one load-bearing
-check is a nonzero `mean_variance` in `_gate.csv` — `V_i` has been exactly 0.0 in every
-run to date. Per-phase history lives in §5, not here — this footer is deliberately kept
-to a few lines so it cannot drift out of sync with it.*
+*Last updated: 2026-08-18 — Phase 3 Stage A RESULT landed (see §5 Phase 3): the
+oracle-vs-real gap is measured at **-3.11 dB at depth 2** (`no_recursion`, 50 two-minute
+scenes, DER 0.113, 4800 paired rows). Scene LENGTH was the cause of the four earlier
+collapses, not geometry — at 10-20 s pyannote returned 2 clusters for 3 speakers in every
+geometry; at 2 minutes it returns 3.00. The loss is entirely the predicted activity masks
+(missed overlap), not the deflation order. `V_i` is a confirmed negative for the fourth
+time. Four outstanding items and the full Stage B work list are enumerated at the end of
+§5 Phase 3. Phase 1 and Phase 2 DoDs remain met and unaffected. Per-phase history lives in
+§5, not here — this footer is deliberately kept to a few lines so it cannot drift out of
+sync with it.*
