@@ -147,7 +147,7 @@ python scripts/run_phase2.py --config configs/phase2/experiments/phase2_librimix
 
 ### Pretrained weights
 
-Both checkpoints are hosted on the Hugging Face Hub under Apache-2.0 (same
+All three checkpoints are hosted on the Hugging Face Hub under Apache-2.0 (same
 license as this repo). They do **not** bundle NVIDIA's TitaNet-Large speaker
 encoder (`nvidia/speakerverification_en_titanet_large`, CC-BY-4.0) — that
 model is loaded separately at runtime via NeMo; see `NOTICE` for the full
@@ -157,16 +157,31 @@ attribution.
 |---|---|---|
 | Phase 1 "proposed" extractor | [`AdityaAA2004/dagger-phase1-proposed-librimix-3spk`](https://huggingface.co/AdityaAA2004/dagger-phase1-proposed-librimix-3spk) | `configs/phase1/dod/phase1_librimix_3spk_eval.yaml`, `configs/phase2/experiments/phase2_librimix_3spk_eval.yaml` |
 | Phase 2 fine-tuned extractor | [`AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned`](https://huggingface.co/AdityaAA2004/dagger-phase2-proposed-librimix-3spk-finetuned) | `configs/phase2/experiments/phase2_librimix_3spk_eval_finetuned.yaml` |
+| **Phase 2 final model** (the reported one) | [`AdityaAA2004/dagger-phase2-final-model`](https://huggingface.co/AdityaAA2004/dagger-phase2-final-model) | `configs/phase2/dod/phase2_librimix_{3,4,5}spk_eval_scratch.yaml`, `configs/phase3/**` |
 
-Fetch and cache either checkpoint locally with:
+**Start with the Phase 2 final model** unless you specifically want to reproduce an
+earlier phase's table. It is the checkpoint every Phase 2 DoD number and every Phase 3
+result is computed from: trained from random init by a single command (no warm-start
+chain), on a multi-depth curriculum interleaving 3-, 4- and 5-speaker mixtures.
+
+Fetch and cache a checkpoint locally with:
 
 ```python
 from huggingface_hub import hf_hub_download
 
 ckpt_path = hf_hub_download(
-    repo_id="AdityaAA2004/dagger-phase1-proposed-librimix-3spk",
-    filename="proposed_librimix_3spk.pt",
+    repo_id="AdityaAA2004/dagger-phase2-final-model",
+    filename="phase2_final_model_weights.pt",
 )
+```
+
+Note the Hub filename (`phase2_final_model_weights.pt`) differs from the path the configs
+expect (`checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt`), so
+either copy it into place or override `extractor.checkpoint` with the cached path:
+
+```bash
+mkdir -p checkpoints/phase2
+cp "$ckpt_path" checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
 ```
 
 ## Limitations
