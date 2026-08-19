@@ -1,0 +1,114 @@
+# Phase 3 Stage B: SMOKE for the dilation sweep. Run this BEFORE the full B1.
+#
+# Identical to phase3_librimix_3spk_dilation_sweep.yaml except `limit: 5` and
+# the tag. It exists for three reasons, in order of importance:
+#
+# 1. FIRST CONTACT WITH THE REAL STACK. Every Stage B test runs against a fake
+#    diarizer and synthetic tones -- no pyannote, no TitaNet, no corpus. Nothing
+#    in the dilation path, the `dilate_ms` columns, or the dropped
+#    `real_forced_m` arm has ever seen real audio. That first contact should
+#    cost minutes, not a session.
+#
+# 2. IT HAS AN EXACT REPRODUCTION REFERENCE. `results/phase3/experiments/
+#    phase3_librimix_3spk_long_smoke.csv` is the same 5 scenes (verified: they
+#    are exactly the first 5 of the 50-scene run, and all 360 shared rows match
+#    it byte for byte). So the `dilate_ms == 0` rows of THIS run must reproduce
+#    those 360 rows exactly -- see the check below. The eval path has no RNG
+#    anywhere (confirmed 2026-07-29 by reproducing a Phase 2 table to the
+#    decimal), so "close" is a failure, not a rounding difference.
+#
+# 3. IT SIZES B1. The full sweep is 50 scenes x 3 arms x 6 dilations = 900
+#    scene-arm-dilation units, against the Stage A run's 50 x 4 = 200 -- roughly
+#    4.5x the work, and no wall time was ever recorded for that run. This smoke
+#    is exactly 1/10th of B1 (same arms, same dilations, 5 scenes instead of
+#    50), so B1 ~= 10x whatever this takes. If that extrapolation lands near the
+#    ~12h ceiling, cut the grid to [0, 25, 50, 100] before starting the real
+#    run rather than discovering it at hour 11.
+#
+# THE CHECK, after this finishes:
+#
+#   python - <<'EOF'
+#   import csv
+#   def load(p, dil=None):
+#       return {(r['diarization'], r['scene'], r['speaker'], r['system'], r['depth']): r['si_sdr']
+#               for r in csv.DictReader(open(p))
+#               if r['diarization'] in {'oracle','real','real_index_order'}
+#               and (dil is None or float(r['dilate_ms']) == 0.0)}
+#   ref = load('results/phase3/experiments/phase3_librimix_3spk_long_smoke.csv')
+#   new = load('results/phase3/experiments/phase3_librimix_3spk_dilation_smoke.csv', dil=0)
+#   shared = set(ref) & set(new)
+#   bad = [k for k in shared if ref[k] != new[k]]
+#   print(f"shared {len(shared)} (expect 360), mismatched {len(bad)}")
+#   EOF
+#
+# Expected: shared 360, mismatched 0. Anything else means the Stage B refactor
+# changed a committed number, and B1 must not start until that is understood.
+#
+# ALSO WORTH READING before trusting the sweep, in this order:
+#   1. `Cluster discovery vs. enrollment` -- healthy is clusters ~= enrolled ~=
+#      3.00. If `enrolled` is 1 the scene is a single-speaker system and every
+#      system comparison in it is vacuous, whatever the SI-SDR column says.
+#   2. The `Overlap dilation sweep` section's `scenes lost` column -- at 5 scenes
+#      even one loss is 20%, so read it as "does the mechanism fire at all",
+#      not as a rate.
+#
+# KAGGLE NOTES (from the 2026-08-15 session):
+#   * `pip install -U numba numba-cuda` before `.[diarize]`, or NeMo fails to
+#     import.
+#   * Run via `!python`, NEVER in-kernel: the pip installs leave numpy mixed on
+#     disk, so a lazily-imported submodule mismatches the numpy already in
+#     memory from `import torch`. Subprocesses are unaffected.
+#   * The clip50 checkpoint is NOT on the HF Hub -- attach it as a dataset.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_dilation_smoke.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  # MUST stay < 0.5 and MUST match the sweep config, or the 0 ms reproduction
+  # check compares two different corpora and fails for the wrong reason.
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 5
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  arms: [oracle, real, real_index_order]
+  dilate_overlap_ms: [0, 10, 25, 50, 100, 200]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+# Must match the sweep config AND the Stage A baseline (which used 2), or the
+# 0 ms `coarse_to_fine` rows will not reproduce.
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: dilation_smoke
