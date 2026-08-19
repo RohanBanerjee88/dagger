@@ -1249,10 +1249,12 @@ what arm 4 exists to separate.
 
 *Not yet done / known gaps.* Nothing has run against pyannote or real data. The clip50 checkpoint
 the DoD config points at is **not on the HF Hub** (only the Phase 1 and Phase 2-finetuned ones
-are), so a fresh Kaggle session must attach it as a dataset or re-upload it. The dev split at
+are), so a fresh Kaggle session must attach it as a dataset or re-upload it. ~~The dev split at
 `offset: 650` (`configs/phase2/experiments/phase2_gate_tune_dev.yaml`) **overlaps** rows
 [650, 800) of the clip50 training run, which used `limit: 800` — move it to `offset: 1000` before
-any Stage B gate tuning, or thresholds get tuned on scenes `G` trained on. Two limitations stay
+any Stage B gate tuning, or thresholds get tuned on scenes `G` trained on.~~ *(Fixed 2026-08-18 in
+Stage B Session A: now `offset: 1000`. The config's own header had claimed `limit: 650`, which is
+what hid the overlap.)* Two limitations stay
 recorded rather than fixed, because Phase 3 cannot vary them: LibriMix's synthetic geometry (hard
 boundaries, no reverb, no turn-taking) makes this gap a **lower bound** on the real-corpora gap
 Phase 4 will see; and the resampler fallback warning exists so a future corpus without
@@ -1382,12 +1384,31 @@ sign: variance-ordering *flatters* the real arm, exactly as predicted when the a
    vacuous in this run. Same pattern as Phase 2's heterogeneous corpus (98.4% accept).
 2. Rejections are **margin only** (3 for gated, 88 for coarse_to_fine); vad, artifact and variance
    are 0 across all 1800 decisions.
-3. **The `real - oracle` accumulation table is a biased subset.** `scripts/aggregate_phase3.py`'s
-   `_table` filters on `n_accepted_before` *before* pairing, so a speaker counts only if its
-   accumulation position matched across arms -- and under `real` the `V_i` sort reorders, so it
-   usually does not (n = 34/28/16). Under `real_index_order` the order matches oracle by
-   construction (n = 98/92/92). **Read the `real_index_order - oracle` accumulation table; the
-   `real` one is not a random sample.** Worth fixing in the script.
+3. ~~**The `real - oracle` accumulation table is a biased subset.**~~ **FIXED 2026-08-18 (Stage B
+   A1) -- both accumulation tables are now usable; the numbers below supersede the originals.**
+   `scripts/aggregate_phase3.py`'s `_table` filtered on `n_accepted_before` *before* pairing, so a
+   speaker counted only if its accumulation position matched across arms -- and under `real` the
+   `V_i` sort reorders, so it usually did not (n = 34/28/16, against 98/92/92 for
+   `real_index_order`, whose order matches oracle by construction). The discarded rows were
+   discarded *because of* the effect being measured, so the survivors were biased, not merely few.
+   `_table` now pairs first and buckets each pair by the **reference arm's** position, which is
+   also the only reading that means anything: "for a speaker the oracle placed at level k, what did
+   real diarization cost it?"
+
+   | `real - oracle`, ungated_deflation | level 0 | level 1 | level 2 |
+   |---|---|---|---|
+   | before (biased) | n=34, -5.51 ±1.30 | n=28, -3.83 ±2.12 | n=16, -6.36 ±2.50 |
+   | after (paired) | **n=100, -7.05 ±0.98** | **n=100, -2.84 ±0.89** | **n=100, -5.79 ±1.06** |
+
+   Levels are now balanced at n≈100 by construction, and SEM roughly halves at every level, so the
+   table gained precision as well as correctness. **The independent check that the fix is right
+   rather than merely different:** `real - oracle` and `real_index_order - oracle` should nearly
+   coincide, since the reordering `V_i` induces is only ~0.25 dB (see above). Before the fix they
+   disagreed by 1-2 dB at every level; after it they agree to ~0.2 dB
+   (-7.05/-2.84/-5.79 vs -6.94/-3.11/-6.01), with the already-correctly-paired arm barely moving
+   (98/92/92 -> 100/100/100). The depth table is **unchanged**, as it must be: depth is derived
+   from the reference activity for both arms, so it always paired correctly.
+   Regression-tested in `tests/phase3/test_accumulation_stratification.py`.
 
 #### `V_i` is dead -- fourth confirmation, now under HEALTHY diarization
 
@@ -1419,9 +1440,24 @@ python scripts/aggregate_phase3.py results/phase3/experiments/phase3_librimix_3s
     --out results/phase3/experiments/phase3_gap_long2min.md
 ```
 
+The four CSVs/`.md`s this produces are now **committed** under `results/phase3/experiments/`, so
+§7's "one command regenerates this" finally holds for Phase 3 as it does for Phase 2. The
+aggregation step above is CPU-only and was re-run against the committed CSVs on 2026-08-18 with the
+fixed `_table` -- that is where the corrected accumulation numbers in caution 3 come from.
+
+Note `run_phase3.py` was run with the pre-Stage-B config, so the committed CSVs have **no
+`dilate_ms` column**. That is handled, not a gap: `load_score_rows` reads a missing column as
+`0.0` (= undilated), which is exactly what that run was.
+
 ---
 
 #### FOUR OUTSTANDING ITEMS (2026-08-18) -- what Stage A left open
+
+> **Status after Stage B Session A (2026-08-18):** all four now have their *code* landed and
+> unit-tested offline; none has been *run*, because every one of them needs TitaNet, the extractor
+> and (for 1 and 3) pyannote on real audio. Item 4's script fix is the exception -- it is CPU-only,
+> so it has been applied to the committed Stage A CSVs and its corrected numbers are in the
+> cautions table above. See "STAGE B -- SESSION A LANDED" below for what exists now.
 
 **1. The gate has never actually been tuned.** `scripts/tune_gate.py` and
 `configs/phase2/experiments/phase2_gate_tune_dev.yaml` have existed since Phase 2 and have never
@@ -1431,10 +1467,11 @@ is **to convert an inference into a measurement**: today's claim that `V_i` cann
 "max 3.2e-4 against a 0.05 threshold", whereas `tune_gate.py` reports Youden's J against a
 deliberately contaminated-enrollment population and refuses to recommend below J = 0.1. A
 documented J ~ 0 is a far stronger negative result than small-looking numbers.
-*Two prerequisites:* (a) a **dev split** -- generate long-scene metadata from `dev-clean`, not
-`test-clean`; tuning on the 50 test scenes and then reporting them is leakage (§8), and note the
-existing dev config's `offset: 650` is stale against a `limit: 800` training run and must move to
->= 1000; (b) remember `gate_cfg` is SHARED between `gated_deflation` and refinement, so raising
+*Two prerequisites, both now MET in code:* (a) a **dev split** -- generate long-scene metadata from
+`dev-clean`, not `test-clean`; tuning on the 50 test scenes and then reporting them is leakage (§8)
+*(done: `configs/phase3/experiments/phase3_gate_tune_dev_long.yaml`; the stale `offset: 650` in the
+Phase 2 dev config is also fixed to 1000)*; (b) remember `gate_cfg` is SHARED between
+`gated_deflation` and refinement, so raising
 `tau_margin` slides gated toward `no_recursion` -- the degenerate direction. In this run only
 `tau_margin` fires at all; vad, artifact and variance are inert across 1800 decisions.
 
@@ -1483,35 +1520,43 @@ extracted audio would embed near-cleanly and refinement's premise would finally 
 refinement is probably gated on extractor quality rather than on the update rule, but the ceiling
 run is what turns that from opinion into evidence.
 
-#### STAGE B -- full work list (not started)
+#### STAGE B -- full work list (items 4/5/6 DONE; 1/2/3/7 coded, runs pending)
 
 Ordered so that everything needing no GPU comes first, and the one training run is entered with its
 design already decided by measurement rather than by guess.
 
 *No GPU -- do these first:*
 
-1. **Overlap-dilation sweep** (item 3). New config key, dilate predicted overlap before `x_O`,
-   sweep on dev. Cheapest open lever; may not need Stage B's retrain at all.
-2. **Oracle-refinement ceiling** (item 4). One eval pass; decides whether refinement stays a
-   reported negative or becomes an engineering problem.
-3. **`tune_gate.py` on a long-scene dev split** (item 1). Produces the Youden's J number for `V_i`
-   and a defensible `tau_margin`; freeze thresholds and apply unchanged everywhere after.
-4. **Fix `aggregate_phase3._table`** so the accumulation stratification pairs before filtering --
-   today the `real - oracle` accumulation table is a biased subset (n = 34/28/16 vs 98/92/92).
-5. **Drop `real_forced_m`** from long-scene configs: identical to `real` to 3 decimals, ~25% of
-   runtime measuring a constant. Keep it in any SHORT-scene config, where counting still fails.
-6. **Move the gate-tune dev split** from `offset: 650` to `>= 1000` -- it currently overlaps rows
-   [650, 800) of the clip50 training run.
+1. ☑ **Overlap-dilation sweep** (item 3) -- **code landed, RUN PENDING.** New config key, dilate
+   predicted overlap before `x_O`, sweep on dev. Cheapest open lever; may not need Stage B's
+   retrain at all.
+2. ☑ **Oracle-refinement ceiling** (item 4) -- **code landed, RUN PENDING.** One eval pass; decides
+   whether refinement stays a reported negative or becomes an engineering problem.
+3. ☑ **`tune_gate.py` on a long-scene dev split** (item 1) -- **code landed, RUN PENDING.**
+   Produces the Youden's J number for `V_i` and a defensible `tau_margin`; freeze thresholds and
+   apply unchanged everywhere after.
+4. ☒ **DONE. Fixed `aggregate_phase3._table`** so the accumulation stratification pairs before
+   filtering. Applied to the committed Stage A CSVs; corrected numbers in the cautions table above.
+5. ☒ **DONE. Dropped `real_forced_m`** from `phase3_librimix_3spk_long.yaml`: identical to `real`
+   to 3 decimals, ~25% of runtime measuring a constant. Kept in the SHORT-scene configs, where
+   counting still fails.
+6. ☒ **DONE. Moved the gate-tune dev split** to `offset: 1000`. Note the config header's
+   justification was itself **wrong** -- it claimed the curriculum runs used `limit: 650`, but
+   `configs/phase2/dod/phase2_librimix_curriculum_3_4_5_train_scratch.yaml` uses `limit: 800` on
+   all three depths, so the old `offset: 650` overlapped 150 training scenes. 1000 leaves a
+   200-row margin. No committed number is affected: this split has never been run.
 
 *The one GPU session -- design it from the measurements above:*
 
-7. **Mask augmentation** in `build_scene_crop_dataset`'s `_prepare` (not `__getitem__`: `_prepare`
-   is where enrollment happens, so augmenting there contaminates enrollment realistically, which is
-   what exercises the whole gate path; note `w_overlap` is precomputed from clean masks and must be
-   recomputed). **Target the measured error profile, not the assumed one:** at 2-minute scenes the
-   profile is miss 0.105 / confusion 0.008, so augmentation should simulate **dropped speaker
-   activity inside overlapped regions**, NOT the label-swap and boundary-jitter mix originally
-   planned from the short-scene runs where confusion dominated (0.171-0.187).
+7. ☑ **Mask augmentation** -- **code landed, RUN PENDING** (`dagger/data/mask_augment.py`, wired
+   into `build_scene_crop_dataset`'s `_prepare`, not `__getitem__`: `_prepare` is where enrollment
+   happens, so augmenting there contaminates enrollment realistically, which is what exercises the
+   whole gate path; `w_overlap` is precomputed from clean masks and is now recomputed after
+   augmentation). **Targets the measured error profile, not the assumed one:** at 2-minute scenes
+   the profile is miss 0.105 / confusion 0.008, so it simulates **dropped speaker activity inside
+   overlapped regions**, NOT the label-swap and boundary-jitter mix originally planned from the
+   short-scene runs where confusion dominated (0.171-0.187). Strength is deliberately NOT
+   pre-committed -- pick it from Session B's dilation result.
 8. **Train on long, multi-depth scenes** (item 2) so train and eval geometry match and depth 3+
    exists, and so the same session repairs the absolute-quality ceiling.
 9. **The 2x2:** {baseline ckpt, mask-augmented ckpt} x {oracle, real}, on the long-scene corpus.
@@ -1524,6 +1569,118 @@ design already decided by measurement rather than by guess.
     were *harder* for speaker counting, and AMI gives each speaker minutes of clean speech. The
     `Diarizer` ABC and the four-arm harness transfer directly, since AMI ships reference
     annotations and so supports the mandatory oracle arm (§6.2).
+
+---
+
+**STAGE B -- SESSION A LANDED (2026-08-18): all Stage B code written and unit-tested offline; the
+three measurement runs are queued but NOT run.** Suite **434 passed / 1 skipped** (baseline 381 --
+note the "357" quoted in the Stage A note was already stale). Nothing below has seen real audio
+except item 4, which is CPU-only and has been applied to the committed Stage A CSVs.
+
+*The compute model this phase now works under.* Everything runs on Kaggle; "CPU" means a Kaggle CPU
+session (burns no GPU quota), "GPU" a GPU session. **The local dev machine cannot run any model
+work at all** -- no NeMo, no pyannote, no `DAGGER_DATA_ROOT`, and the clip50 checkpoint is not in
+`checkpoints/` (only the Phase 1 and Phase 2-finetuned ones are). So "no GPU" in the work list
+above never meant "runs locally": items 1, 2, 3 and 7 all need TitaNet + the extractor + (for 1
+and 3) pyannote on real audio. Work is therefore grouped by *which session type it needs*:
+
+| session | items | what it costs |
+|---|---|---|
+| **A** (local / Kaggle CPU) | 4, 5, 6 + the code for 1, 2, 3, 7 | none -- done |
+| **B** (Kaggle GPU, no training) | run 1, 2, 3 | one short session |
+| **C** (Kaggle GPU, training) | 7, 8, 9 | one long session, designed from B |
+
+*Session B's three runs, all against Stage A's chain@0.3 corpus and the clip50 checkpoint so every
+row pairs against the committed baseline:*
+
+* `configs/phase3/experiments/phase3_librimix_3spk_dilation_sweep.yaml` --
+  `dilate_overlap_ms: [0, 10, 25, 50, 100, 200]`.
+* `configs/phase3/experiments/phase3_librimix_3spk_refine_ceiling.yaml` -- `refine.oracle_ceiling: true`.
+* `configs/phase3/experiments/phase3_gate_tune_dev_long.yaml` -- `tune_gate.py` on a **dev-clean**
+  long-scene split.
+
+The sweep's `0 ms` point is the Stage A baseline re-run and doubles as a reproduction check, at no
+extra cost since it is one value in the swept list.
+
+#### Three design decisions worth knowing before reading the code
+
+1. **The dilation sweep runs INSIDE one invocation, not one run per value.** `dilate_overlap_ms`
+   accepts a list, and `score_scene_all_arms` loops it over the cached `Regions`. Dilation is pure
+   post-processing, so pyannote runs **once per scene** however many values are swept. That is a
+   cost saving, but the correctness reason matters more: pyannote's clustering is not guaranteed
+   bit-reproducible, so re-running it per sweep point could let the *regions themselves* drift
+   between the points being compared -- turning a one-variable comparison into a two-variable one.
+   Pinned by a test that counts diarizer invocations.
+2. **The refinement ceiling scores AUDIO, not embeddings.** The natural formulation -- accept iff
+   the candidate embedding is closer to the true speaker's -- does not typecheck, and the way it
+   fails is instructive: candidates live in `phi`'s TitaNet space, an eval-encoder reference in
+   WavLM space, and the only way to make them comparable is to embed the true source with `phi` --
+   exactly the training-encoder-as-metric violation §6.3 forbids. So the rule accepts iff the
+   *reconstruction* from the candidate scores higher SI-SDR against the clean source. No encoder is
+   involved, so §6.3 cannot be violated, and it bounds the quantity actually reported rather than a
+   proxy for it. Cost is one extra `reconstruct_all` per round -- each speaker's output depends
+   only on its own embedding (§1), so every candidate evaluates in one batched call.
+   *Reading it:* `coarse_to_fine` minus `no_recursion` **within the same run** (the other three
+   systems never refine, so they are a valid control), plus the new `ceiling_accept_gate_would_reject`
+   reason count, which IS the headroom the deployable gate could not reach. If that count is ~0,
+   the gate was already making the right calls and refinement's deficit is not an acceptance
+   problem at all.
+3. **`tune_gate.py` needed a real diarizer to make `V_i` measurable, not merely to be tidy.** Under
+   oracle regions `V_i` is *structurally* 0 -- one solo run -> one clip -> variance over a single
+   sample -- while the contaminated fixture (enrolling from a speaker's overlap region, which has
+   several runs) is nonzero. Sweeping "identically 0" against "anything at all" separates them
+   perfectly and reports a spectacular Youden's J for a property that does not exist in deployment.
+   The real question is whether contaminated variance clears the floor a real diarizer's fragmented
+   solo regions already produce on honest enrollment (Stage A: nonzero in 1332/1800, max 3.24e-4).
+   Only a real-diarization honest population can answer it. The `tests/phase3/test_tune_gate_real_regions.py`
+   suite asserts the oracle honest population is exactly 0, so the premise is checked rather than
+   assumed.
+
+#### Three defects the new tests caught before any GPU time was spent
+
+Each is the same shape as every reporting defect this project has shipped: a plausible number, and
+nothing failing.
+
+1. **`np.convolve(..., mode="same")` returns `max(len(signal), len(kernel))` samples.** A dilation
+   half-width wider than the scene produced an over-long mask. It happened to raise on the
+   broadcast against `activity`, but would have silently mis-sized a squarer array -- and the sweep
+   reaches that regime *legitimately*, since a large value is exactly how the enrollment-starvation
+   limit gets measured. Replaced with an exact O(n) prefix-sum window.
+2. **Every existing Phase 3 table would have averaged across dilation values.** None of them filter
+   on `dilate_ms`, so a six-point sweep would have blended six different pipelines into one cell
+   labelled "depth 2" -- the same two-variables-in-one-column mistake that cost Phase 2 five runs on
+   the depth axis. Every table below the sweep section now reports the **0 ms baseline only**, and
+   `aggregate_phase3.py` holds `dilate_ms` fixed inside the pairing key so an arm difference is
+   always taken at one dilation.
+3. **The new config guards ran after `build_dataset`.** `main()` already documents the opposite
+   intent for arm validation ("a config typo should not first require DAGGER_DATA_ROOT to be
+   mounted"); the refine guard now sits with it. All four guards verified to refuse before the
+   corpus mounts.
+
+#### Regression evidence
+
+* `aggregate_phase2.py` still reproduces `phase2_accumulation_scratch345clip50.md`
+  **byte-identically** (modulo the trailing newline already documented in Phase 2's close-out), so
+  the `dagger/metrics/phase2_scores.py` changes did not disturb any committed Phase 2 number.
+  `plot_phase2_depth.py` still runs and still flags the n=3 thin point.
+* `SCORE_FIELDS` and `GATE_FIELDS` are **untouched**, so the Phase 2 CSV schema is unchanged. Every
+  new parameter (`score_scene`'s `refine_oracle_ceiling`, `refine_embeddings`' `accept_fn`,
+  `measure_scene`'s `diarizer`, `build_scene_crop_dataset`'s `mask_augment`) defaults to the prior
+  behaviour, and `accept_fn=None` is pinned bit-identical by test.
+* `dilate_ms` is Phase 3-only: `load_score_rows` reads a missing column as `0.0`, so the committed
+  Stage A CSVs (which predate it) load unchanged.
+
+#### Still open going into Session B
+
+* **`refine.rounds`.** Both Session B configs keep `rounds: 2` to match the Stage A baseline
+  exactly. `refine.rounds: 0` remains the DEFAULT for reported systems -- refinement is net-harmful
+  in every regime measured -- and B2 is the run that decides whether that becomes final.
+* **Depth 3 does not exist in the Session B corpus.** Chain at overlap 0.3 makes s1 and s3
+  disjoint. That is deliberate (comparability with the committed baseline); depth 3 arrives with
+  the scheduled long-solo geometry in Session C.
+* **Absolute quality is still the extractor's operating point**, not diarization's -- the *oracle*
+  arm reaches only 1.73 dB at depth 2. Nothing in Session A changed training, so nothing here could
+  have moved it. It is repaired, if at all, by Session C's training budget.
 
 ### ☐ Phase 4 — Real corpora + full ablation
 
@@ -1601,13 +1758,15 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-08-18 — Phase 3 Stage A RESULT landed (see §5 Phase 3): the
-oracle-vs-real gap is measured at **-3.11 dB at depth 2** (`no_recursion`, 50 two-minute
-scenes, DER 0.113, 4800 paired rows). Scene LENGTH was the cause of the four earlier
-collapses, not geometry — at 10-20 s pyannote returned 2 clusters for 3 speakers in every
-geometry; at 2 minutes it returns 3.00. The loss is entirely the predicted activity masks
-(missed overlap), not the deflation order. `V_i` is a confirmed negative for the fourth
-time. Four outstanding items and the full Stage B work list are enumerated at the end of
-§5 Phase 3. Phase 1 and Phase 2 DoDs remain met and unaffected. Per-phase history lives in
-§5, not here — this footer is deliberately kept to a few lines so it cannot drift out of
-sync with it.*
+*Last updated: 2026-08-18 — Phase 3 Stage B **Session A** landed (see §5 Phase 3): every
+Stage B component is written and unit-tested offline (suite **434 passed / 1 skipped**), and
+the Stage A result CSVs are now committed under `results/phase3/experiments/`. The one item
+that needed no models — the `aggregate_phase3._table` pairing fix — has been applied to those
+CSVs, and the corrected `real - oracle` accumulation table (n = 34/28/16 → **100/100/100**,
+SEM roughly halved) supersedes the original. The three measurement runs (dilation sweep,
+refinement ceiling, gate tuning) have configs ready but are **NOT run** — they need TitaNet,
+the extractor and pyannote on real audio, i.e. a Kaggle session; the local machine has none
+of them. Stage A's headline is unchanged: **-3.11 dB at depth 2**, caused by the predicted
+activity masks (missed overlap), not the deflation order. Phase 1 and Phase 2 DoDs remain met
+and unaffected. Per-phase history lives in §5, not here — this footer is deliberately kept to
+a few lines so it cannot drift out of sync with it.*

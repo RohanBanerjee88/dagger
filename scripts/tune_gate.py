@@ -64,6 +64,7 @@ from dagger.audio.provenance import original_mixture
 from dagger.data import Scene, build_dataset
 from dagger.data.paths import load_env
 from dagger.diarize.oracle import activity_matrix, overlap_mixture, solo_overlap_regions
+from dagger.diarize.regions import scene_regions
 from dagger.enroll.encoder import TitaNetEncoder
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
@@ -117,6 +118,7 @@ def measure_scene(
     enroll_budget_ms: float | None,
     encoder: TitaNetEncoder,
     extractor: TFGridNetCrossAttnExtractor,
+    diarizer=None,
 ) -> list[dict]:
     """Measure all four gate diagnostics on one scene, for every population.
 
@@ -126,12 +128,36 @@ def measure_scene(
     conditioned on). ``honest`` and ``correct`` describe the same healthy run
     and share its numbers; they are emitted as separate rows so each sweep can
     select its own comparison pair without re-deriving it.
+
+    ``diarizer`` decides where the regions come from; ``None`` means oracle,
+    which is what every config predating this argument gets.
+
+    **Why a real diarizer matters here, and why it is not a tidy-up.** Under
+    oracle diarization ``V_i`` is *structurally* zero: the scene scheduler gives
+    each speaker exactly one solo run, enrollment therefore draws one clip, and
+    the variance across one sample is 0 by definition. So the honest population
+    is pinned at exactly 0 while the contaminated fixture below (which enrolls
+    from a speaker's *overlap* region, and so can draw several clips) is
+    nonzero. A sweep between "identically 0" and "anything at all" separates the
+    two perfectly and reports a spectacular Youden's J -- for a property that
+    does not exist in deployment.
+
+    The question worth answering is whether contaminated variance clears the
+    variance a *real* diarizer's fragmented solo regions already produce on
+    honest enrollment (Phase 3 Stage A measured that floor: nonzero in
+    1332/1800 decisions, max 3.24e-4). Only a real-diarization honest
+    population can answer it, which is why this argument exists.
     """
-    n = scene.mixture.shape[0]
-    activity, speakers = activity_matrix(
-        scene.segments, num_samples=n, sample_rate=scene.sample_rate, speakers=scene.speakers
-    )
-    solo, overlap = solo_overlap_regions(activity)
+    if diarizer is None:
+        activity, speakers = activity_matrix(
+            scene.segments, num_samples=scene.mixture.shape[0],
+            sample_rate=scene.sample_rate, speakers=scene.speakers,
+        )
+        solo, overlap = solo_overlap_regions(activity)
+    else:
+        regions = scene_regions(scene, diarizer)
+        activity, speakers = regions.activity, regions.speakers
+        solo, overlap = regions.solo, regions.overlap
     x = original_mixture(scene.mixture, label="x")
     x_O = overlap_mixture(x, overlap, label="x_O")
     num_speakers = len(speakers)
@@ -380,6 +406,23 @@ def main() -> int:
     encoder = TitaNetEncoder(device=device)
     extractor = TFGridNetCrossAttnExtractor(checkpoint_path=checkpoint_path, device=device, **extractor_cfg)
 
+    # Absent -> oracle regions, i.e. every pre-existing config is unchanged.
+    # See measure_scene's docstring for why a real diarizer is what makes the
+    # `V_i` sweep mean anything.
+    diarizer_cfg = dict(cfg.get("diarizer", {}))
+    diarizer = None
+    if diarizer_cfg:
+        from dagger.diarize.pyannote_diarizer import DEFAULT_MODEL, PyannoteDiarizer
+
+        diarizer = PyannoteDiarizer(
+            model=str(diarizer_cfg.get("model", DEFAULT_MODEL)),
+            device=device,
+            num_speakers=diarizer_cfg.get("num_speakers"),
+        )
+        print(f"diarizer: {diarizer_cfg.get('model', DEFAULT_MODEL)} (honest population is REAL)")
+    else:
+        print("diarizer: oracle -- V_i is structurally 0, so its sweep is not meaningful")
+
     # `dataset` may be a single dict or a list of per-depth entries, matching
     # scripts/train_phase1.py's curriculum support -- thresholds tuned at one
     # speaker count would otherwise specialize to it.
@@ -394,6 +437,7 @@ def main() -> int:
             try:
                 scene_rows = measure_scene(
                     scene, fade, enroll_k, min_clip_ms, enroll_budget_ms, encoder, extractor,
+                    diarizer=diarizer,
                 )
             except NoSoloRegionError as exc:
                 skipped += 1

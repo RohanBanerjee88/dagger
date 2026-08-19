@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from dagger.data.base import Scene, SceneDataset
+from dagger.data.mask_augment import drop_overlapped_activity
 from dagger.diarize.oracle import activity_matrix, solo_overlap_regions
 from dagger.enroll.encoder import SpeakerEncoder
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
@@ -42,6 +43,7 @@ def build_scene_crop_dataset(
     fade: int = 0,
     seed: int | None = None,
     require_overlap: bool = False,
+    mask_augment: dict | None = None,
 ):
     """Build a ``torch.utils.data.Dataset`` of fixed-length training crops.
 
@@ -63,8 +65,28 @@ def build_scene_crop_dataset(
 
     ``require_overlap=True`` drops scenes with no overlap at all (logged, like
     the enrollment skips): they contribute zero extractor training signal.
+
+    ``mask_augment`` (``None`` = off, and the code path is then unchanged) turns
+    on simulated diarization error -- see :mod:`dagger.data.mask_augment` for
+    what is simulated and why it is *dropped overlapped activity* rather than
+    the label swaps originally planned. Its keys are forwarded to
+    :func:`~dagger.data.mask_augment.drop_overlapped_activity`.
+
+    Augmentation happens **here, in ``_prepare``**, not in ``__getitem__``, and
+    the placement is the point: ``_prepare`` is also where enrollment runs, so
+    corrupting the masks first means the embeddings are computed from
+    contaminated solo regions exactly as they would be at inference under a real
+    diarizer. Augmenting per-crop instead would leave enrollment pristine and
+    train ``G`` against a pairing that never occurs in deployment.
     """
     import torch
+
+    augment_rng = np.random.default_rng(
+        seed if mask_augment is None else mask_augment.get("seed", seed)
+    )
+    augment_kwargs = {
+        k: v for k, v in (mask_augment or {}).items() if k != "seed"
+    }
 
     def _prepare(scene: Scene):
         n = scene.mixture.shape[0]
@@ -72,6 +94,16 @@ def build_scene_crop_dataset(
             scene.segments, num_samples=n, sample_rate=scene.sample_rate,
             speakers=scene.speakers,
         )
+        if mask_augment is not None:
+            activity = drop_overlapped_activity(
+                activity, scene.sample_rate, augment_rng, **augment_kwargs
+            )
+        # Everything below is derived from `activity`, so it must be computed
+        # AFTER augmentation -- `solo`/`overlap` define the copy-vs-extract
+        # split, and `w_overlap` is the exact weighting the extractor's loss is
+        # applied through. Deriving `w_overlap` from clean masks while training
+        # on corrupted ones would optimize against a window the model never
+        # sees, and nothing would fail.
         solo, overlap = solo_overlap_regions(activity)
         w_overlap = np.stack(
             [crossfade_windows(solo[i], activity[i], fade=fade)[1] for i in range(len(speakers))],

@@ -18,12 +18,34 @@ whether speaker j was refined before or after it in the same round.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
+
 import numpy as np
 
 from dagger.enroll.encoder import SpeakerEncoder
 from dagger.extract.base import Extractor
 from dagger.gate.confidence import GateResult, confidence_gate
 from dagger.reconstruct.stitch import reconstruct_all
+
+#: ``reason`` values used only when an ``accept_fn`` overrides the gate. They
+#: record the 2x2 of (what the alternative rule did, what the gate would have
+#: done) in the existing field, so no CSV schema anywhere has to change -- and
+#: the two disagreement rows are the whole point of a ceiling run:
+#: ``ceiling_accept_gate_would_reject`` is headroom the real gate cannot reach.
+CEILING_ACCEPT_GATE_REJECT = "ceiling_accept_gate_would_reject"
+CEILING_REJECT_GATE_ACCEPT = "ceiling_reject_gate_would_accept"
+
+
+def _override_reason(committed: bool, gate: GateResult) -> str:
+    """How an overridden decision is labelled, preserving the gate's verdict."""
+    if committed and gate.accepted:
+        return "accepted"
+    if committed:
+        return CEILING_ACCEPT_GATE_REJECT
+    if gate.accepted:
+        return CEILING_REJECT_GATE_ACCEPT
+    return gate.reason
 
 
 def _longest_run(mask: np.ndarray) -> tuple[int, int] | None:
@@ -63,6 +85,7 @@ def refine_embeddings(
     max_mean_variance: float,
     min_vad_coverage: float,
     max_artifact_score: float,
+    accept_fn: Callable[[int, np.ndarray, np.ndarray], bool] | None = None,
 ) -> tuple[np.ndarray, list[list[GateResult | None]]]:
     """Refine each speaker's embedding over ``rounds`` iterations.
 
@@ -103,6 +126,31 @@ def refine_embeddings(
     ``"overlap_clip_too_short"``, distinct from the ``None`` used for "no
     overlap-only region at all" -- under real diarization those two are
     different failures and the difference is informative.
+
+    ``accept_fn`` replaces the gate's *commit* decision with an arbitrary rule,
+    called as ``accept_fn(i, candidate_output, current_output)`` on this round's
+    reconstructed audio. ``None`` -- the default and the only deployable setting
+    -- keeps the confidence gate, and the code path is then bit-identical to
+    before this argument existed.
+
+    It exists for ONE experiment: the oracle-refinement **ceiling** (CLAUDE.md
+    §5 Phase 3, outstanding item 4). Refinement is now measured net-negative in
+    every regime tried -- clean enrollment, heterogeneous enrollment, and
+    contaminated real-diarization enrollment -- but "never positive" cannot be
+    established by accumulating negatives. Substituting a rule that can see the
+    ground truth answers the different, decidable question: does refinement have
+    any headroom on this extractor at all? A still-negative ceiling is a
+    publishable negative result with a stated mechanism; a positive ceiling the
+    real gate cannot find means the acceptance RULE is what is broken, not
+    refinement. See :mod:`dagger.refine.oracle_ceiling`.
+
+    The gate still runs and its verdict is still recorded when ``accept_fn`` is
+    given -- ``GateResult.accepted`` reports what was actually committed, and
+    ``reason`` records where the two disagreed
+    (``ceiling_accept_gate_would_reject`` is precisely the headroom the real
+    gate missed). Cost is one extra ``reconstruct_all`` per round: each
+    speaker's output depends only on its own embedding, so every candidate is
+    evaluated in a single batched call rather than one per speaker.
     """
     num_speakers = activity.shape[0]
     embeddings = np.array(initial_embeddings, dtype=np.float64, copy=True)
@@ -118,6 +166,12 @@ def refine_embeddings(
         outputs = reconstruct_all(x, x_O, activity, solo, embeddings, extractor, fade=fade)
         candidate_embeddings = embeddings.copy()
         round_results.append([None] * num_speakers)
+        # (speaker -> blended candidate) for the speakers that produced one. The
+        # commit decision is deferred to a second pass so an `accept_fn` can
+        # judge every candidate's reconstructed AUDIO, which needs all of them
+        # in hand. Order-independence is unaffected: `others` and the blend
+        # below still read `embeddings`, this round's start-of-round values.
+        proposals: dict[int, np.ndarray] = {}
 
         for i in range(num_speakers):
             overlap_i = (activity[i] > 0) & (solo[i] <= 0)
@@ -189,8 +243,35 @@ def refine_embeddings(
                 precomputed_embedding=raw_embedding,
             )
             round_results[-1][i] = result
-            if result.accepted:
-                candidate_embeddings[i] = blended
+            proposals[i] = blended
+
+        if accept_fn is None:
+            for i, blended in proposals.items():
+                if round_results[-1][i].accepted:
+                    candidate_embeddings[i] = blended
+        elif proposals:
+            # One batched reconstruction with every candidate applied at once.
+            # Legal because reconstruct_all extracts each speaker from the same
+            # untouched x_O using only that speaker's own embedding (CLAUDE.md
+            # §1) -- so speaker i's row here is exactly what it would be if only
+            # i's candidate had been applied. That is what makes a single call
+            # correct rather than an approximation.
+            trial = embeddings.copy()
+            for i, blended in proposals.items():
+                trial[i] = blended
+            trial_outputs = reconstruct_all(
+                x, x_O, activity, solo, trial, extractor, fade=fade
+            )
+            for i, blended in proposals.items():
+                gate_result = round_results[-1][i]
+                committed = bool(accept_fn(i, trial_outputs[i], outputs[i]))
+                round_results[-1][i] = replace(
+                    gate_result,
+                    accepted=committed,
+                    reason=_override_reason(committed, gate_result),
+                )
+                if committed:
+                    candidate_embeddings[i] = blended
 
         embeddings = candidate_embeddings
 

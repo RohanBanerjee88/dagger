@@ -59,7 +59,13 @@ dataset:
 diarizer:
   name: pyannote
   model: pyannote/speaker-diarization-community-1
-  arms: [oracle, real, real_forced_m, real_index_order]
+  # `real_forced_m` DROPPED (2026-08-18). At 2-minute scenes it came out
+  # IDENTICAL to `real` -- same DER to 3 decimals, same SI-SDR to 2, +0.00 on
+  # all 300 paired rows -- because pyannote picks 3 speakers unaided at this
+  # length. It was ~25% of runtime measuring a constant. Keep it in any
+  # SHORT-scene config, where speaker counting still fails (2.04-2.07 clusters
+  # for 3 speakers).
+  arms: [oracle, real, real_index_order]
 
 enroll:
   k: 3

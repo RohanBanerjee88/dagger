@@ -44,7 +44,7 @@ from dagger.metrics.phase2_scores import (
     SYSTEMS,
     load_score_rows,
     mean_sem,
-    paired_by_field,
+    paired_rows_by_field,
 )
 
 #: (left arm, right arm, what the difference isolates).
@@ -67,22 +67,52 @@ def _stats(diffs: list[float]) -> tuple[float, float, int, float, float]:
 
 
 def _table(rows: list[dict], left: str, right: str, x_field: str) -> list[str]:
-    """One comparison, stratified over ``x_field`` (``depth`` or accumulation)."""
-    xs = sorted({r[x_field] for r in rows if r.get(x_field) is not None})
+    """One comparison, stratified over ``x_field`` (``depth`` or accumulation).
+
+    **Pairs first, buckets second.** Filtering on ``x_field`` before pairing --
+    which this did until 2026-08-18 -- keeps only the speakers whose ``x_field``
+    value coincides across the two arms. On ``depth`` that is a no-op, since
+    depth is derived from the reference activity for both arms and they always
+    agree. On ``n_accepted_before`` it silently discards most of the sample, and
+    discards it *because of* the very effect being measured: deflation order is
+    ascending ``V_i``, which real diarization turns from a no-op into a real
+    permutation. Measured cost: n = 34/28/16 against 98/92/92 for the arm whose
+    order matches oracle by construction.
+
+    Buckets are the **reference (right) arm's** value, which is also the only
+    reading that carries meaning: "for a speaker the reference arm placed at
+    level k, what did the left arm cost it?" Bucketing on the left arm would ask
+    a question about a position the diarizer itself chose.
+    """
+    # `dilate_ms` joins the pairing key so an arm-vs-arm difference is always
+    # taken at the SAME dilation. A swept CSV holds several different pipelines;
+    # pairing `real` at 50 ms against `oracle` at 0 ms would silently measure the
+    # knob and the diarizer together and report the sum as the diarizer's cost.
+    pairs = paired_rows_by_field(
+        rows, "diarization", left, right,
+        key_fields=("source", "scene", "speaker", "depth", "system", "dilate_ms"),
+    )
+    # Blank is not zero for the accumulation-free systems -- 0 means "nothing was
+    # deflated before me", which is a different statement from "this system never
+    # deflates" (see _OPTIONAL_INT_FIELDS in dagger.metrics.phase2_scores). Such
+    # rows carry no accumulation level and are dropped rather than bucketed at 0.
+    buckets: dict[tuple[str, int], list[float]] = {}
+    for left_row, right_row in pairs:
+        x = right_row.get(x_field)
+        if x is None:
+            continue
+        buckets.setdefault((left_row["system"], int(x)), []).append(
+            left_row["si_sdr"] - right_row["si_sdr"]
+        )
+
     lines = [
         f"| system | {x_field} | n | mean (dB) | SEM | win rate | \\|t\\| |",
         "|---|---|---|---|---|---|---|",
     ]
     any_row = False
     for system_name in SYSTEMS:
-        for x in xs:
-            subset = [
-                r for r in rows
-                if r["system"] == system_name and r.get(x_field) == x
-            ]
-            diffs = paired_by_field(subset, "diarization", left, right)
-            if not diffs:
-                continue
+        for x in sorted(x for s, x in buckets if s == system_name):
+            diffs = buckets[(system_name, x)]
             any_row = True
             mean, sem, n, wins, t = _stats(diffs)
             lines.append(
@@ -108,11 +138,27 @@ def main() -> int:
             "number is not interpretable without the oracle beside it."
         )
 
+    dilations = sorted({r["dilate_ms"] for r in rows})
+    if len(dilations) > 1:
+        # A sweep CSV can be aggregated, but only one pipeline at a time: the
+        # tables below would otherwise blend several dilation values into one
+        # "depth 2" cell. run_phase3.py's own report has the sweep section.
+        rows = [r for r in rows if r["dilate_ms"] == 0.0]
+
     lines = [
         "# Phase 3 -- oracle-vs-real gap", "",
         f"sources: {', '.join(p.name for p in args.csv)}",
         f"arms present: {', '.join(arms)}",
-        f"paired rows loaded: {len(rows)}", "",
+        f"paired rows loaded: {len(rows)}", "",]
+    if len(dilations) > 1:
+        lines += [
+            f"> These CSVs sweep `dilate_overlap_ms` over {dilations} ms. This",
+            "> report covers the **0 ms baseline only** -- every other value is a",
+            "> different pipeline, and averaging across them would label a mean of",
+            "> pipelines as a property of one. See the sweep section in",
+            "> `run_phase3.py`'s own `.md` for the dilation comparison.", "",
+        ]
+    lines += [
         "All differences are PAIRED on matched (scene, speaker, depth, system) rows,",
         "so scene difficulty cancels exactly. SEM is the precision of the mean, not",
         "the spread of the data (CLAUDE.md §7) -- the two differ by ~30x here.", "",
@@ -130,6 +176,12 @@ def main() -> int:
             "The axis CLAUDE.md §6.4 says to claim on: depth measures intrinsic",
             "difficulty and hits every system equally, which buried the",
             "accumulation effect for five Phase 2 runs.", "",
+            f"Levels are the **`{right}`** arm's accumulation position, so each row reads",
+            f"\"for a speaker `{right}` placed at level k, what did `{left}` cost it?\".",
+            "Rows are paired BEFORE they are bucketed -- filtering first would keep only",
+            "the speakers whose position coincides across arms, and under real",
+            "diarization the ascending-`V_i` sort makes that disagreement the norm",
+            "rather than the exception (it is the effect being measured, not noise).", "",
         ]
         lines += _table(rows, left, right, "n_accepted_before")
 

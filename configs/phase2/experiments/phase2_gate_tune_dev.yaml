@@ -7,10 +7,19 @@
 # against what it is supposed to detect.
 #
 # Why a dev split at all: selecting thresholds on the 150 test scenes and then
-# reporting results on those same scenes is leakage (CLAUDE.md §8). The
-# curriculum training runs used `limit: 650` on these same train-360 CSVs, i.e.
-# rows [0, 650), so `offset: 650` below is provably disjoint from BOTH training
-# and the (separate) test CSVs.
+# reporting results on those same scenes is leakage (CLAUDE.md §8).
+#
+# CORRECTED 2026-08-18. This header used to claim the curriculum runs used
+# `limit: 650`, which made `offset: 650` disjoint from training. That was wrong:
+# configs/phase2/dod/phase2_librimix_curriculum_3_4_5_train_scratch.yaml uses
+# `limit: 800` with no offset on all three depths, i.e. rows [0, 800). The old
+# `offset: 650` therefore overlapped rows [650, 800) -- 150 scenes the extractor
+# had trained on -- and thresholds tuned there would have been tuned partly on
+# training data. Moved to `offset: 1000`, which leaves a 200-row margin so a
+# future run that raises `limit` a little does not silently re-create the leak.
+#
+# This split has never actually been run (V_i was structurally 0 until Phase 3
+# gave it a real diarizer), so no committed number is affected by the change.
 #
 # Why NOT tune against SI-SDR: gated_deflation interpolates between
 # ungated_deflation (accept everything) and no_recursion (reject everything --
@@ -34,21 +43,21 @@ dataset:
     n_src: 3
     placement: scheduled
     min_solo_ms: 1000.0
-    offset: 650      # rows [0, 650) were the curriculum training slice
+    offset: 1000     # training used rows [0, 800); 200-row margin
     limit: 50
   - name: librimix
     metadata: metadata/Libri3Mix/libri3mix_train-360_x4.csv
     n_src: 4
     placement: scheduled
     min_solo_ms: 1000.0
-    offset: 650
+    offset: 1000
     limit: 50
   - name: librimix
     metadata: metadata/Libri3Mix/libri3mix_train-360_x5.csv
     n_src: 5
     placement: scheduled
     min_solo_ms: 1000.0
-    offset: 650
+    offset: 1000
     limit: 50
 
 enroll:

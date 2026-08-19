@@ -88,6 +88,15 @@ def load_score_rows(
                     # Phase 2 CSV, where it reads as None -- so those files keep
                     # loading unchanged and a mixed set stays distinguishable.
                     "diarization": row.get("diarization"),
+                    # Phase 3's overlap-dilation sweep point, in ms. Absent
+                    # (Phase 2, and Phase 3 runs predating the sweep) reads as
+                    # 0.0 = undilated, which is what those runs were. Carried
+                    # so downstream pairing can hold it FIXED: a swept CSV
+                    # contains several different pipelines, and averaging across
+                    # them would relabel a mean of pipelines as a property of
+                    # one -- the same two-variables-in-one-column mistake that
+                    # cost Phase 2 five runs on the depth axis.
+                    "dilate_ms": float(row.get("dilate_ms") or 0.0),
                 }
                 for field in _REQUIRED_INT_FIELDS:
                     record[field] = int(row[field])
@@ -217,6 +226,42 @@ def paired_differences(
     left = {key(r): r["si_sdr"] for r in rows if r["system"] == system}
     right = {key(r): r["si_sdr"] for r in rows if r["system"] == control}
     return [left[k] - right[k] for k in left if k in right]
+
+
+def paired_rows_by_field(
+    rows: Iterable[dict],
+    field: str,
+    left_value: str,
+    right_value: str,
+    *,
+    key_fields: Sequence[str] = ("source", "scene", "speaker", "depth", "system"),
+) -> list[tuple[dict, dict]]:
+    """``(left_row, right_row)`` for every row both values of ``field`` scored.
+
+    :func:`paired_by_field` throws the rows away and keeps only the differences,
+    which is all a ``depth`` stratification needs -- the two arms always agree on
+    depth, because it is derived from the REFERENCE activity for both (see
+    ``dagger.eval.systems.score_scene``). It is NOT enough on the accumulation
+    axis, where the two arms routinely disagree: deflation order is ascending
+    ``V_i``, identically 0 under oracle diarization but a real permutation under
+    a real diarizer, so a speaker's ``n_accepted_before`` is arm-dependent by
+    construction.
+
+    A caller that filters on such a field *before* pairing therefore keeps only
+    the speakers whose position happened to coincide across arms -- which is
+    exactly the quantity under study, so the surviving sample is biased rather
+    than merely small. On the Stage A run that showed up as n = 34/28/16 against
+    n = 98/92/92 for the arm whose order matches oracle by construction.
+
+    Returning the rows lets the caller pair first and bucket afterwards, on
+    whichever arm is the reference. See ``scripts/aggregate_phase3.py::_table``.
+    """
+    def key(row: dict) -> tuple:
+        return tuple(row[f] for f in key_fields)
+
+    left = {key(r): r for r in rows if r.get(field) == left_value}
+    right = {key(r): r for r in rows if r.get(field) == right_value}
+    return [(left[k], right[k]) for k in left if k in right]
 
 
 def paired_by_field(

@@ -1,0 +1,102 @@
+# Phase 3 Stage B, run B1: the OVERLAP-DILATION sweep.
+#
+# WHY. Stage A attributed the whole -3.11 dB oracle-vs-real gap to the predicted
+# activity masks, and named the mechanism in the DER decomposition:
+# overlap_recall 0.758, i.e. ~24% of true overlap frames labelled non-overlap.
+# On those frames the pipeline takes the SOLO-COPY path and emits the raw
+# mixture verbatim as one speaker's track, with every other voice in it at full
+# level. The two errors are wildly asymmetric -- an over-called overlap frame
+# only runs `G` where a copy would have done -- so the derived overlap mask is
+# deliberately biased toward inclusion.
+#
+# This is the cheapest open lever in the phase: one config key, no retraining.
+#
+# HOW THE SWEEP IS PAID FOR. `dilate_overlap_ms` as a LIST sweeps inside a
+# single run. Dilation is pure post-processing on the cached Regions, so
+# pyannote runs ONCE per scene however many values are swept -- six points cost
+# roughly one run's diarization plus six runs' reconstruction, not six of each.
+# It also keeps the comparison honest: pyannote's clustering is not guaranteed
+# bit-reproducible, so re-running it per value could let the regions themselves
+# drift between the points being compared.
+#
+# 0 is always swept (the script adds it if absent), so the baseline is measured
+# in the same pass rather than borrowed from another run's numbers. That 0 ms
+# point should reproduce the committed Stage A `long2min` table.
+#
+# CORPUS. Deliberately Stage A's chain@0.3 long-scene metadata, unchanged, so
+# every row pairs against the committed baseline and the knob's effect is
+# cleanly attributable. Note this corpus has NO depth 3 (chain at overlap 0.3
+# makes s1 and s3 disjoint); depth 3 arrives with the scheduled long-solo
+# geometry in the Session C training run.
+#
+# READ THE TWO HALVES OF THE SWEEP TABLE TOGETHER. Dilation buys overlap-mask
+# recall with overlap-mask false alarm, which is the good trade -- but it also
+# shrinks solo regions, and solo is where enrollment draws from. A value that
+# improves SI-SDR while dropping speakers ("scenes lost" column) is not a win,
+# it is a smaller and easier problem being scored.
+#
+#   python scripts/build_long_scene_metadata.py \
+#       --librispeech-root $DAGGER_DATA_ROOT/LibriSpeech/test-clean \
+#       --output $DAGGER_DATA_ROOT/metadata/Libri3Mix/libri3mix_test_long.csv \
+#       --n-src 3 --num-scenes 50 --per-speaker-sec 50 --overlap 0.3
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_dilation_sweep.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  # MUST stay < 0.5: chain puts the middle speaker between the other two, and at
+  # 0.5 its solo window closes exactly (measured 32 s / 1 s / 33 s on a 129 s
+  # scene) -- reproducing the starvation the long-scene corpus exists to escape.
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 50
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  # real_forced_m dropped: identical to `real` at this scene length (+0.00 on
+  # all 300 paired rows), so it was ~25% of runtime measuring a constant.
+  arms: [oracle, real, real_index_order]
+  # Half-widths in ms. The top of the range is deliberately past the useful
+  # point -- the sweep has to show where enrollment starvation overtakes the
+  # recall gain, and a grid that stops before the turn cannot.
+  dilate_overlap_ms: [0, 10, 25, 50, 100, 200]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# Untuned Phase 2 defaults, unchanged ON PURPOSE for this run: B1 varies the
+# dilation and nothing else. Thresholds get chosen in B3 and frozen after.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+# Kept at 2 to match the Stage A baseline exactly. `refine.rounds: 0` remains
+# the DEFAULT for reported systems (refinement is net-harmful in every regime
+# measured) -- this run is not the place to change a second variable.
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: dilation_sweep

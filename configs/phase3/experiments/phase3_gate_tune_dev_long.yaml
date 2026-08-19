@@ -1,0 +1,98 @@
+# Phase 3 Stage B, run B3: gate-threshold selection on a LONG-SCENE DEV split.
+#
+# WHY THIS CONFIG EXISTS RATHER THAN THE PHASE 2 ONE. Two changes, both
+# load-bearing:
+#
+# 1. `diarizer:` is set, so the HONEST population is measured under real
+#    diarization. Under oracle regions V_i is *structurally* zero -- the scene
+#    scheduler gives each speaker one solo run, enrollment draws one clip, and
+#    the variance across one sample is 0 by definition. Sweeping a nonzero
+#    contaminated population against a healthy one pinned at exactly 0
+#    separates them perfectly and reports a spectacular Youden's J, for a
+#    property that does not exist in deployment. The real question is whether
+#    contaminated variance clears the floor a real diarizer's FRAGMENTED solo
+#    regions already produce on honest enrollment -- Stage A measured that
+#    floor at nonzero in 1332/1800 decisions, max 3.24e-4, against a threshold
+#    of 0.05 (~150x above it).
+#
+# 2. Long scenes, from `dev-clean`. Length because pyannote returned ~2 clusters
+#    for 3 speakers at every SHORT geometry tried (10-20 s), and only reached
+#    3.00 at 2 minutes -- a degenerate m=1 scene has nothing to gate. `dev-clean`
+#    because tuning on the 50 test scenes and then reporting them is leakage
+#    (CLAUDE.md §8).
+#
+# WHAT THIS RUN IS FOR. Converting an INFERENCE into a MEASUREMENT. Today's
+# claim that V_i cannot work rests on "max 3.2e-4 against a 0.05 threshold",
+# which is an argument from small-looking numbers. tune_gate.py reports Youden's
+# J against a deliberately contaminated-enrollment population and REFUSES to
+# recommend below J = 0.1. A documented J ~ 0 is a far stronger negative result
+# than the numbers alone -- and if J is high, V_i works for the first time in
+# this project's history.
+#
+# CAUTION BEFORE COPYING ANY VALUE OUT OF THE OUTPUT. `gate_cfg` is SHARED
+# between `gated_deflation` and coarse_to_fine's refinement -- there is one dict
+# and no per-system tuning. Raising `tau_margin` therefore slides
+# `gated_deflation` toward `no_recursion` (a gate that rejects everything leaves
+# the residual pristine), which is the degenerate direction: it improves the
+# baseline the accumulation experiment exists to beat, for reasons that have
+# nothing to do with the theory. Freeze ONE set of thresholds, apply them
+# unchanged everywhere, and confirm with a single full run.
+#
+#   python scripts/build_long_scene_metadata.py \
+#       --librispeech-root $DAGGER_DATA_ROOT/LibriSpeech/dev-clean \
+#       --output $DAGGER_DATA_ROOT/metadata/Libri3Mix/libri3mix_dev_long.csv \
+#       --n-src 3 --num-scenes 50 --per-speaker-sec 50 --overlap 0.3
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/tune_gate.py \
+#       --config configs/phase3/experiments/phase3_gate_tune_dev_long.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_dev_long.csv
+  n_src: 3
+  placement: chain
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 50
+  diarizer_sample_rate: 16000
+
+# Present -> the honest population uses real regions. Remove this block to get
+# the old oracle behaviour (and a meaningless V_i sweep).
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# What the sweep is measured AGAINST, not what it recommends.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+tune:
+  # Bracket the range Stage A actually observed (max 3.24e-4) as well as the
+  # current threshold, or the sweep cannot show where -- if anywhere -- the two
+  # populations separate. A grid that starts at 0.01 would report "no threshold
+  # rejects anything" and look like a broken fixture rather than a real floor.
+  max_mean_variance_grid: [0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
+  tau_margin_grid: [-0.2, -0.1, 0.0, 0.05, 0.1, 0.15, 0.2, 0.3]
+  min_vad_coverage_grid: [0.0, 0.25, 0.5, 0.75]
+  max_artifact_score_grid: [0.7, 0.8, 0.9, 1.0]
+  results_dir: results/phase3/experiments
+  tag: dev_long

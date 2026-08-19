@@ -151,6 +151,7 @@ def score_scene(
     regions=None,
     order_policy: str = "variance",
     on_unenrollable: str = "raise",
+    refine_oracle_ceiling: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Run all four systems on one scene.
 
@@ -181,6 +182,13 @@ def score_scene(
       diarizer did — precisely the selection bias that silently shrank Phase 1's
       effective dataset (CLAUDE.md's `stagger_offsets` note). An unenrollable
       speaker is a real outcome and is reported, not hidden.
+
+    ``refine_oracle_ceiling`` replaces refinement's confidence gate with a rule
+    that reads the clean sources — see :mod:`dagger.refine.oracle_ceiling`. It is
+    **NOT DEPLOYABLE** and exists to bound a component this project is otherwise
+    about to report as net-harmful in every regime tested. Only
+    ``coarse_to_fine`` is affected; the other three systems never refine, so
+    their rows are unchanged and stay a valid control within the same run.
     """
     if regions is None:
         from dagger.diarize.oracle import OracleDiarizer
@@ -288,11 +296,21 @@ def score_scene(
     # regression in the deflation loop itself.
     assert n_accepted_before["ungated_deflation"] == [deflation_idx[i] for i in range(num_speakers)]
 
+    refine_accept_fn = None
+    if refine_oracle_ceiling:
+        from dagger.refine.oracle_ceiling import make_oracle_accept_fn
+
+        # Built from the ALREADY-RESTRICTED targets, so row i here is the same
+        # row i the refiner sees. Ground truth reaches only the accept/reject
+        # decision; the audio is still G(x_O, e) per CLAUDE.md §1.
+        refine_accept_fn = make_oracle_accept_fn([target for _, target in targets])
+
     refined_embeddings, round_results = refine_embeddings(
         x, x_O, activity, solo, embeddings, variances, extractor, encoder, scene.sample_rate,
         rounds=refine_rounds, fade=fade,
         tau_margin=gate_cfg["tau_margin"], max_mean_variance=gate_cfg["max_mean_variance"],
         min_vad_coverage=gate_cfg["min_vad_coverage"], max_artifact_score=gate_cfg["max_artifact_score"],
+        accept_fn=refine_accept_fn,
     )
     outputs["coarse_to_fine"] = reconstruct_all(
         x, x_O, activity, solo, refined_embeddings, extractor, fade=fade

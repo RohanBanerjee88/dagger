@@ -68,7 +68,7 @@ from dagger.data.paths import load_env
 from dagger.diarize.base import DiarizationFailedError
 from dagger.diarize.mapping import map_clusters_to_speakers
 from dagger.diarize.oracle import OracleDiarizer
-from dagger.diarize.regions import scene_regions
+from dagger.diarize.regions import dilate_overlap, scene_regions
 from dagger.enroll.encoder import TitaNetEncoder
 from dagger.enroll.topk import NoSoloRegionError
 from dagger.eval.systems import GATE_FIELDS, SCORE_FIELDS, SYSTEMS, score_scene
@@ -92,13 +92,16 @@ DEFAULT_ARMS = ("oracle", "real", "real_forced_m", "real_index_order")
 # paired comparisons key on -- keying on the cluster id would make every
 # oracle-vs-real pair miss (oracle rows are `s1..`, real rows `SPEAKER_00..`)
 # and silently produce an empty gap table.
-PHASE3_SCORE_FIELDS = ["diarization"] + SCORE_FIELDS + ["cluster", "n_clusters"]
-PHASE3_GATE_FIELDS = ["diarization"] + GATE_FIELDS + ["cluster"]
+PHASE3_SCORE_FIELDS = (
+    ["diarization", "dilate_ms"] + SCORE_FIELDS + ["cluster", "n_clusters"]
+)
+PHASE3_GATE_FIELDS = ["diarization", "dilate_ms"] + GATE_FIELDS + ["cluster"]
 
 DIAR_FIELDS = [
-    "scene", "diarization", "m", "der", "miss_rate", "false_alarm_rate",
+    "scene", "diarization", "dilate_ms", "m", "der", "miss_rate", "false_alarm_rate",
     "confusion_rate", "overlap_recall", "n_ref", "n_pred",
     "n_missed_speakers", "n_spurious_clusters", "total_speech",
+    "mask_overlap_recall", "mask_overlap_false_alarm",
 ]
 
 
@@ -132,13 +135,43 @@ def _build_diarizer(diarizer_cfg: dict, num_speakers: int | None, device: str):
     )
 
 
-def _diarization_row(scene, regions, arm: str) -> dict:
-    """DER and components for one arm on one scene, against oracle activity."""
-    reference = scene_regions(scene, OracleDiarizer()).activity
+def _diarization_row(scene, regions, arm: str, dilate_ms: float = 0.0) -> dict:
+    """DER and components for one arm on one scene, against oracle activity.
+
+    DER itself is computed from ``regions.activity``, which ``dilate_overlap``
+    leaves untouched -- so every DER column is identical across dilation values
+    by construction. That is correct: dilation is an audio-path decision, not a
+    better activity estimate, and letting it move DER would let the knob grade
+    its own homework.
+
+    The two ``mask_overlap_*`` columns are what the sweep is actually read on.
+    They score the DERIVED overlap mask (the thing dilation changes, and the
+    thing that decides copy-vs-extract) against the true overlap region:
+    recall is the share of genuinely-overlapped frames the pipeline will extract
+    on, false alarm the share of non-overlapped frames it will needlessly run
+    ``G`` over. Stage A measured recall 0.758, and the whole asymmetry argument
+    is that buying recall with false alarm is a good trade.
+    """
+    reference_regions = scene_regions(scene, OracleDiarizer())
+    reference = reference_regions.activity
     result = diarization_error_rate(reference, regions.activity)
+
+    true_overlap = reference_regions.overlap > 0
+    predicted_overlap = regions.overlap > 0
+    n_true = int(true_overlap.sum())
+    n_clean = int((~true_overlap).sum())
     return {
         "scene": scene.name,
         "diarization": arm,
+        "dilate_ms": dilate_ms,
+        "mask_overlap_recall": (
+            float((predicted_overlap & true_overlap).sum() / n_true)
+            if n_true else float("nan")
+        ),
+        "mask_overlap_false_alarm": (
+            float((predicted_overlap & ~true_overlap).sum() / n_clean)
+            if n_clean else float("nan")
+        ),
         "m": int(reference.shape[0]),
         "der": result.der,
         "miss_rate": result.miss_rate,
@@ -169,6 +202,9 @@ def score_scene_all_arms(
     refine_rounds: int,
     diarizer_cache: dict,
     arm_failures: dict | None = None,
+    dilate_ms_values: list[float] = (0.0,),
+    refine_oracle_ceiling: bool = False,
+    dilation_failures: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Run every arm over one scene. Returns ``(score, gate, diarization)`` rows.
 
@@ -179,6 +215,13 @@ def score_scene_all_arms(
     guaranteed bit-reproducible, could make the two arms differ in their regions
     as well as their order -- destroying the one-variable-at-a-time property the
     whole decomposition rests on.
+
+    ``dilate_ms_values`` sweeps :func:`~dagger.diarize.regions.dilate_overlap`
+    **inside** this per-scene function, for exactly the same two reasons. It is
+    pure post-processing on the cached ``Regions``, so pyannote still runs once
+    per scene no matter how many values are swept -- and running it per value
+    would let the regions themselves drift between the points being compared.
+    ``[0.0]`` (the default) is the undilated baseline and adds no work.
     """
     score_rows: list[dict] = []
     gate_rows: list[dict] = []
@@ -217,25 +260,51 @@ def score_scene_all_arms(
                     arm_failures[arm] = arm_failures.get(arm, 0) + 1
                 print(f"[diarize] scene {scene.name!r}: skipping arm {arm!r} -- {exc}")
                 continue
-        regions = regions_cache[key]
+        base_regions = regions_cache[key]
 
-        rows, gates = score_scene(
-            scene, fade, enroll_k, min_clip_ms, enroll_budget_ms,
-            encoder, extractor, gate_cfg, refine_rounds,
-            regions=regions, order_policy=order_policy,
-            # A real diarizer routinely invents a cluster lying entirely inside
-            # another speaker's speech, which can never be enrolled. Failing the
-            # whole scene on that would discard scenes in proportion to how badly
-            # the diarizer did -- the selection bias that silently shrank Phase
-            # 1's dataset. Applied to EVERY arm so the arms stay comparable; it
-            # is a no-op for oracle, where the scheduler guarantees solo audio.
-            on_unenrollable="drop",
-        )
-        for row in rows:
-            score_rows.append({"diarization": arm, **row})
-        for row in gates:
-            gate_rows.append({"diarization": arm, **row})
-        diar_rows.append(_diarization_row(scene, regions, arm))
+        for dilate_ms in dilate_ms_values:
+            samples = int(round(dilate_ms / 1000.0 * scene.sample_rate))
+            regions = dilate_overlap(base_regions, samples)
+
+            try:
+                rows, gates = score_scene(
+                    scene, fade, enroll_k, min_clip_ms, enroll_budget_ms,
+                    encoder, extractor, gate_cfg, refine_rounds,
+                    regions=regions, order_policy=order_policy,
+                    # A real diarizer routinely invents a cluster lying entirely
+                    # inside another speaker's speech, which can never be
+                    # enrolled. Failing the whole scene on that would discard
+                    # scenes in proportion to how badly the diarizer did -- the
+                    # selection bias that silently shrank Phase 1's dataset.
+                    # Applied to EVERY arm so the arms stay comparable; it is a
+                    # no-op for oracle, where the scheduler guarantees solo audio.
+                    on_unenrollable="drop",
+                    refine_oracle_ceiling=refine_oracle_ceiling,
+                )
+            except NoSoloRegionError as exc:
+                # Dilation shrinks solo regions, so a large enough value can
+                # leave a scene with no enrollable speaker at all. Caught HERE,
+                # per (arm, dilation), rather than letting it propagate: at the
+                # scene level it would drop the scene from EVERY sweep point
+                # including the 0 ms baseline, which is the one point that must
+                # stay comparable to the committed Stage A numbers. Counted so
+                # the knob's cost is reported instead of inferred from a
+                # shrinking `n`.
+                if dilation_failures is not None:
+                    dilation_failures[(arm, dilate_ms)] = (
+                        dilation_failures.get((arm, dilate_ms), 0) + 1
+                    )
+                print(
+                    f"[enroll] scene {scene.name!r} arm {arm!r} "
+                    f"dilate={dilate_ms:g} ms: {exc}"
+                )
+                continue
+
+            for row in rows:
+                score_rows.append({"diarization": arm, "dilate_ms": dilate_ms, **row})
+            for row in gates:
+                gate_rows.append({"diarization": arm, "dilate_ms": dilate_ms, **row})
+            diar_rows.append(_diarization_row(scene, regions, arm, dilate_ms))
 
     return score_rows, gate_rows, diar_rows
 
@@ -430,6 +499,85 @@ def _gate_section(gate_rows: list[dict], arms: list[str]) -> list[str]:
     return lines
 
 
+def _dilation_section(
+    rows: list[dict],
+    diar_rows: list[dict],
+    depths: list[int],
+    dilation_failures: dict | None,
+    n_scenes: int,
+) -> list[str]:
+    """The overlap-dilation sweep: what the knob buys, and what it costs.
+
+    Read the two halves TOGETHER. Dilation trades overlap-mask false alarms
+    (cheap: ``G`` runs where a copy would have done) for overlap-mask recall
+    (the expensive failure: an unseparated mixture emitted as a speaker's
+    track). But it also shrinks solo regions, which is the same audio enrollment
+    draws from -- so a value that improves SI-SDR while dropping speakers is not
+    a win, it is a smaller, easier problem being scored.
+
+    Rows are paired against the 0 ms baseline on matched
+    ``(scene, speaker, depth, system)``, per CLAUDE.md §7 -- so scene difficulty
+    cancels exactly rather than being averaged over.
+    """
+    values = sorted({r["dilate_ms"] for r in rows})
+    if len(values) < 2:
+        return []
+
+    lines = [
+        "", "## Overlap dilation sweep", "",
+        "Paired against the 0 ms baseline on matched (scene, speaker, depth, system).",
+        "`recall`/`false alarm` score the DERIVED overlap mask against the true",
+        "overlap region -- the mask that decides copy-vs-extract, which is what",
+        "dilation actually moves (DER is unchanged by construction: dilation does",
+        "not touch `activity`).", "",
+    ]
+
+    for arm in sorted({r["diarization"] for r in rows}):
+        lines += [
+            f"### `{arm}`", "",
+            "| dilate (ms) | recall | false alarm | scenes lost | "
+            + " | ".join(f"d{k} vs 0ms" for k in depths) + " |",
+            "|---" * (4 + len(depths)) + "|",
+        ]
+        for value in values:
+            diar_subset = [
+                r for r in diar_rows
+                if r["diarization"] == arm and r["dilate_ms"] == value
+            ]
+
+            def _avg(field: str) -> float:
+                vals = [r[field] for r in diar_subset if not np.isnan(r[field])]
+                return float(np.mean(vals)) if vals else float("nan")
+
+            lost = (dilation_failures or {}).get((arm, value), 0)
+            cells = []
+            for depth in depths:
+                def keyed(at: float) -> dict:
+                    return {
+                        (r["scene"], r["speaker"], r["system"]): c
+                        for r in rows
+                        if r["diarization"] == arm and r["dilate_ms"] == at
+                        and r["depth"] == depth
+                        for c in [clip_score(r["si_sdr"])]
+                        if c is not None
+                    }
+
+                here, base = keyed(value), keyed(0.0)
+                diffs = [here[k] - base[k] for k in here if k in base]
+                if not diffs:
+                    cells.append("n/a")
+                    continue
+                mean, sem, n = mean_sem(diffs)
+                cells.append(f"{mean:+.2f}±{sem:.2f} (n={n})")
+            lines.append(
+                f"| {value:g} | {_avg('mask_overlap_recall'):.3f} | "
+                f"{_avg('mask_overlap_false_alarm'):.3f} | {lost}/{n_scenes} | "
+                + " | ".join(cells) + " |"
+            )
+        lines.append("")
+    return lines
+
+
 def _ordering_section(rows: list[dict], arms: list[str], depths: list[int]) -> list[str]:
     """Does the Phase 2 ordering survive real diarization?
 
@@ -472,6 +620,8 @@ def _write_results(
     arms: list[str],
     arm_failures: dict | None = None,
     n_scenes: int | None = None,
+    dilation_failures: dict | None = None,
+    refine_oracle_ceiling: bool = False,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / f"{stem}.csv"
@@ -490,13 +640,39 @@ def _write_results(
             writer.writerows(payload)
 
     depths = sorted({r["depth"] for r in rows})
+    # Every table below the sweep section reports the UNDILATED baseline only.
+    # Dilation is a per-row condition, not a per-run one, so leaving it mixed in
+    # would average an absolute SI-SDR across several different pipelines and
+    # call the result "depth 2" -- the same conflation-of-two-variables mistake
+    # that cost Phase 2 five runs on the wrong axis.
+    all_rows = rows
+    dilate_values = sorted({r["dilate_ms"] for r in rows})
+    rows = [r for r in rows if r["dilate_ms"] == 0.0]
+    baseline_gate_rows = [r for r in gate_rows if r["dilate_ms"] == 0.0]
+    baseline_diar_rows = [r for r in diar_rows if r["dilate_ms"] == 0.0]
+
     lines = [
-        f"# Phase 3 results -- {stem}", "", f"rows scored: {len(rows)}",
+        f"# Phase 3 results -- {stem}", "", f"rows scored: {len(all_rows)}",
         f"arms: {', '.join(arms)}", "",
         f"(means clip +-inf to +-{SI_SDR_CAP_DB:.0f} dB rather than dropping them)",
         "",
-        "## Absolute SI-SDR (per arm x system x depth)", "",
     ]
+    if refine_oracle_ceiling:
+        lines += [
+            "> **NOT A DEPLOYABLE RESULT.** `refine.oracle_ceiling` was ON, so",
+            "> `coarse_to_fine` accepted refinement candidates by comparing SI-SDR",
+            "> against the CLEAN SOURCES. Its rows are an upper bound on what any",
+            "> acceptance rule could achieve, not a system that could be shipped.",
+            "> The other three systems never refine and are unaffected, so they",
+            "> remain a valid control within this run.", "",
+        ]
+    if len(dilate_values) > 1:
+        lines += [
+            f"> Dilation sweep over {dilate_values} ms. **Every table below the",
+            "> sweep section reports the 0 ms baseline only** -- mixing dilation",
+            "> values into one mean would average across different pipelines.", "",
+        ]
+    lines += ["## Absolute SI-SDR (per arm x system x depth)", ""]
     header = "| arm | system | " + " | ".join(f"depth {k}" for k in depths) + " |"
     lines += [header, "|---" * (len(depths) + 2) + "|"]
     for arm in arms:
@@ -531,9 +707,12 @@ def _write_results(
             pct = f"{100.0 * count / total:.0f}%" if total else "n/a"
             lines.append(f"| {arm} | {count} | {total} | {pct} |")
 
-    lines += _diar_section(diar_rows, arms)
+    lines += _dilation_section(
+        all_rows, diar_rows, depths, dilation_failures, n_scenes or 0
+    )
+    lines += _diar_section(baseline_diar_rows, arms)
     lines += _enrollment_section(rows, arms)
-    lines += _gate_section(gate_rows, arms)
+    lines += _gate_section(baseline_gate_rows, arms)
     lines += _gap_section(rows, arms, depths)
     lines += _ordering_section(rows, arms, depths)
 
@@ -573,12 +752,35 @@ def main() -> int:
     unknown = [a for a in arms if a not in ARMS]
     if unknown:
         raise SystemExit(f"unknown diarizer arms {unknown}; expected {sorted(ARMS)}")
+
+    # Scalar or list; a list sweeps inside one run so the diarizer is paid for
+    # once. 0 is always included so every sweep carries its own baseline and the
+    # comparison never depends on a different run's numbers.
+    dilate_raw = diarizer_cfg.pop("dilate_overlap_ms", 0.0)
+    dilate_ms_values = sorted(
+        {float(v) for v in (dilate_raw if isinstance(dilate_raw, (list, tuple)) else [dilate_raw])}
+        | {0.0}
+    )
+    if any(v < 0 for v in dilate_ms_values):
+        raise SystemExit("diarizer.dilate_overlap_ms values must be >= 0.")
     if "oracle" not in arms:
         # Guardrail §6.2: a real-diarization number without its oracle companion
         # cannot be attributed to the diarizer rather than to phi or G.
         raise SystemExit(
             "the 'oracle' arm is mandatory (CLAUDE.md §6.2: never report a "
             "real-diarization number without the oracle number beside it)."
+        )
+
+    # Same rule as the arm check above: refuse an incoherent refinement config
+    # here, not after the corpus has mounted and the checkpoint has loaded.
+    refine_cfg = cfg.get("refine", {})
+    refine_rounds = int(refine_cfg.get("rounds", 2))
+    refine_oracle_ceiling = bool(refine_cfg.get("oracle_ceiling", False))
+    if refine_oracle_ceiling and refine_rounds == 0:
+        raise SystemExit(
+            "refine.oracle_ceiling is on but refine.rounds is 0 -- refinement "
+            "never runs, so the ceiling would measure nothing while producing a "
+            "complete-looking table."
         )
 
     device = _device(args.device)
@@ -593,7 +795,6 @@ def main() -> int:
     extractor_cfg = dict(cfg.get("extractor", {}))
     checkpoint_path = extractor_cfg.pop("checkpoint", None)
     gate_cfg = cfg.get("gate", {})
-    refine_rounds = int(cfg.get("refine", {}).get("rounds", 2))
 
     encoder = TitaNetEncoder(device=device)
     extractor = TFGridNetCrossAttnExtractor(
@@ -602,8 +803,16 @@ def main() -> int:
 
     print(
         f"dataset: {cfg['dataset']['name']}  scenes: {len(dataset)}  "
-        f"@ {sample_rate} Hz  fade={fade} samples  arms={arms}"
+        f"@ {sample_rate} Hz  fade={fade} samples  arms={arms}  "
+        f"dilate_ms={dilate_ms_values}"
     )
+    if refine_oracle_ceiling:
+        print(
+            "\n*** refine.oracle_ceiling is ON. `coarse_to_fine` accepts a\n"
+            "*** refinement candidate by comparing SI-SDR against the CLEAN\n"
+            "*** SOURCES. This is a scoring-time upper bound and is NOT a\n"
+            "*** deployable system -- never report its rows as a result.\n"
+        )
 
     rows: list[dict] = []
     gate_rows: list[dict] = []
@@ -611,6 +820,7 @@ def main() -> int:
     skipped: list[tuple[str, str]] = []
     diarizer_cache: dict = {}
     arm_failures: dict[str, int] = {}
+    dilation_failures: dict[tuple[str, float], int] = {}
     for scene in dataset:
         try:
             scene_rows, scene_gate_rows, scene_diar_rows = score_scene_all_arms(
@@ -620,6 +830,9 @@ def main() -> int:
                 extractor=extractor, gate_cfg=gate_cfg,
                 refine_rounds=refine_rounds, diarizer_cache=diarizer_cache,
                 arm_failures=arm_failures,
+                dilate_ms_values=dilate_ms_values,
+                refine_oracle_ceiling=refine_oracle_ceiling,
+                dilation_failures=dilation_failures,
             )
         except NoSoloRegionError as exc:
             # Benign and expected under real diarization: a predicted cluster may
@@ -657,7 +870,9 @@ def main() -> int:
         stem = f"{stem}_{tag}"
     results_dir = Path(cfg.get("eval", {}).get("results_dir", "results"))
     _write_results(rows, gate_rows, diar_rows, results_dir, stem, arms,
-                   arm_failures=arm_failures, n_scenes=len(dataset))
+                   arm_failures=arm_failures, n_scenes=len(dataset),
+                   dilation_failures=dilation_failures,
+                   refine_oracle_ceiling=refine_oracle_ceiling)
     return 0
 
 
