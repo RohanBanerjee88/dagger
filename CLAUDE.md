@@ -755,6 +755,17 @@ supplies multiple segments of differing quality. Tuning must happen on the dev s
 650`), never on test -- and note `gate_cfg` is shared, so raising `tau_margin` also tightens
 `gated_deflation` toward `no_recursion`, the degenerate direction.
 
+> **2026-08-20, on the two halves of that paragraph.** The `V_i` sentence is the ONLY statement of
+> it in this file that was fully correct: "structurally dead **until real diarization supplies
+> multiple segments of differing quality**" is exactly what happened, and the caveat that later
+> notes dropped is what made it right. Keep the qualifier when quoting it.
+> But **"three of the four thresholds behave sensibly at their defaults" did NOT survive.**
+> `tau_margin: 0.1` scores Youden's J = +0.046 against swapped conditioning ("no usable
+> threshold"), and `max_mean_variance: 0.05` is 500x above `V_i`'s usable range. "Behaves sensibly"
+> meant "fires at a plausible-looking rate", which is not evidence that a check detects anything --
+> that is what a fault fixture is for, and none had been run. (`offset: 650` above is also stale;
+> it is now 1000.) See Stage B Session B Q3.
+
 *Pending:* one scratch-trained curriculum run at larger scale
 (`configs/phase2/dod/phase2_librimix_curriculum_3_4_5_train_scratch.yaml`, no `init_checkpoint`, so the
 reported checkpoint comes from one command rather than a chain of prior fine-tunes), then re-run
@@ -794,6 +805,11 @@ requirement is therefore **met** for the first time in Phase 2.
    `mean_variance` is *exactly* 0.0 in 69-82% of them and <= 2e-4 otherwise, against a 0.05
    threshold. Exactly as predicted -- it stays a Phase 3 item and cannot be tuned until real
    diarization supplies multiple enrollment segments of differing quality.
+   > **PARTLY CORRECTED (2026-08-20).** "Structurally 0 under oracle diarization" is right and
+   > stays -- one solo run gives one clip and the variance over one sample is 0 by definition. But
+   > "dead" does not follow: once real diarization supplies several clips, `V_i` scores J = +0.373
+   > at a **1e-4** threshold. The `0.05` this compares against is 500x too high. See Stage B
+   > Session B Q3.
 
 #### The accumulation magnitude weakened, and the terminal step is a new finding
 
@@ -1096,6 +1112,11 @@ Headline the scratch number: it has clean single-command provenance *and* it is 
   `mean_variance` is *exactly* 0.0 in 77% of them and never exceeds 4.23e-4 against a 0.05
   threshold. Rejections are margin (3,138) and artifact_score (45) only. Phase 3 item -- it cannot
   be tuned until real diarization supplies multiple enrollment segments of differing quality.
+  > **PARTLY CORRECTED (2026-08-20):** structurally 0 under *oracle* regions, yes -- but not dead.
+  > At a 1e-4 threshold on real diarization it scores J = +0.373; `0.05` is 500x too high. And the
+  > 3,138 `margin` rejections counted here are now suspect from the other direction: the margin
+  > scored J = +0.046 ("no usable threshold") on the dev sweep. See Stage B Session B Q3, including
+  > why that margin result is itself pending a conditioning probe.
 
 #### Absolute quality: a training-budget fact, and a Phase 4 input
 
@@ -1410,14 +1431,21 @@ sign: variance-ordering *flatters* the real arm, exactly as predicted when the a
    from the reference activity for both arms, so it always paired correctly.
    Regression-tested in `tests/phase3/test_accumulation_stratification.py`.
 
-#### `V_i` is dead -- fourth confirmation, now under HEALTHY diarization
+#### ~~`V_i` is dead -- fourth confirmation~~ **WRONG. See Stage B Session B Q3 (2026-08-20).**
+
+> **CORRECTED.** The measurements below are right; the conclusion drawn from them is not.
+> `tune_gate.py` on a dev split later scored `V_i` at **Youden's J = +0.373** at a threshold of
+> **1e-4**. The signal was always there -- `max_mean_variance: 0.05` sits **500x above the entire
+> usable range**, so of course nothing ever fired. "It never crosses the threshold" was read as
+> "the check cannot work" when it meant "the threshold is in the wrong place." Note the sentence
+> below explicitly rules out the tuning explanation, which is exactly the inference that was wrong.
 
 Nonzero in 1332/1800 decisions, max **0.000324** against a `max_mean_variance: 0.05` threshold
 (~150x below), **zero rejections**. The oracle arm shows 0/45 nonzero in the smoke while real shows
 42/45, so the mechanism works -- real diarization genuinely fragments enrollment into multiple
-clips -- the magnitude simply never crosses anything. This is no longer explainable as a tuning
-problem or as a consequence of degenerate scenes: it now holds with 3.00 clusters enrolled, 0
-degenerate scenes and DER 0.113.
+clips -- the magnitude simply never crosses anything. ~~This is no longer explainable as a tuning
+problem~~ (it was exactly a tuning problem) or as a consequence of degenerate scenes: it now holds
+with 3.00 clusters enrolled, 0 degenerate scenes and DER 0.113.
 
 #### Absolute quality is the EXTRACTOR's operating point, not diarization's
 
@@ -1497,7 +1525,10 @@ inclusion -- dilate predicted overlap by some milliseconds before building `x_O`
 one knob, sweepable on dev, **no retraining**. If missed overlap really is the dominant cost this
 should recover a meaningful share of the 3.11 dB, and it is the cheapest open lever in the phase.
 
-**4. "Refinement is net-negative" needs a CEILING, not more repetitions.** It is now negative in
+**4. "Refinement is net-negative" needs a CEILING, not more repetitions.**
+*(Status 2026-08-20: the ceiling was built and run, but scored the wrong slice, so it is not yet
+answered -- see Stage B Session B Q2. The reasoning below stands unchanged and is why the re-run
+matters.)* It is now negative in
 every regime tested -- clean enrollment (Phase 2, -0.07 to -0.54 dB), heterogeneous enrollment
 (Phase 2, -0.36/-0.69), and contaminated real-diarization enrollment (Stage A, -0.49 dB). But
 "never positive" is not provable by accumulating negatives, and the mechanism explains why the
@@ -1520,21 +1551,25 @@ extracted audio would embed near-cleanly and refinement's premise would finally 
 refinement is probably gated on extractor quality rather than on the update rule, but the ceiling
 run is what turns that from opinion into evidence.
 
-#### STAGE B -- full work list (items 4/5/6 DONE; 1/2/3/7 coded, runs pending)
+#### STAGE B -- full work list (4/5/6 done; 1/3 RUN; 2 run but VOID, re-run queued; 7/8/9 open)
 
 Ordered so that everything needing no GPU comes first, and the one training run is entered with its
 design already decided by measurement rather than by guess.
 
 *No GPU -- do these first:*
 
-1. ☑ **Overlap-dilation sweep** (item 3) -- **code landed, RUN PENDING.** New config key, dilate
-   predicted overlap before `x_O`, sweep on dev. Cheapest open lever; may not need Stage B's
-   retrain at all.
-2. ☑ **Oracle-refinement ceiling** (item 4) -- **code landed, RUN PENDING.** One eval pass; decides
-   whether refinement stays a reported negative or becomes an engineering problem.
-3. ☑ **`tune_gate.py` on a long-scene dev split** (item 1) -- **code landed, RUN PENDING.**
-   Produces the Youden's J number for `V_i` and a defensible `tau_margin`; freeze thresholds and
-   apply unchanged everywhere after.
+1. ☒ **DONE. Overlap-dilation sweep** (item 3) -- **recovers 91% of the depth-2 gap**
+   (-2.98 -> -0.28 dB at 800 ms, 52% win rate vs oracle), no retraining. Also priced "copy, don't
+   separate" at 43.9 dB and closed the Phase 1 context limitation at +0.02 dB. Operating point NOT
+   yet chosen: needs the un-stratified metric first. See Session B Q1.
+2. ☒ **RUN, THEN VOIDED. Oracle-refinement ceiling** (item 4) -- the rule scored the whole waveform
+   while the table reported depth 2, so its number was not a bound. Fixed 2026-08-20; **re-run
+   queued (~1.7 h)**. The headroom question is currently *unknown*, not answered. See Session B Q2.
+3. ☒ **DONE. `tune_gate.py` on a long-scene dev split** (item 1) -- `V_i` scores **J = +0.373 at a
+   1e-4 threshold**, overturning four "structurally dead" conclusions; the shipped `0.05` is 500x
+   too high. `tau_margin` scores J = +0.046 ("no usable threshold") but that result is **pending a
+   conditioning probe** on clip50, since the fixture is void if `G` does not steer. Thresholds NOT
+   yet frozen. See Session B Q3.
 4. ☒ **DONE. Fixed `aggregate_phase3._table`** so the accumulation stratification pairs before
    filtering. Applied to the committed Stage A CSVs; corrected numbers in the cautions table above.
 5. ☒ **DONE. Dropped `real_forced_m`** from `phase3_librimix_3spk_long.yaml`: identical to `real`
@@ -1682,6 +1717,215 @@ nothing failing.
   arm reaches only 1.73 dB at depth 2. Nothing in Session A changed training, so nothing here could
   have moved it. It is repaired, if at all, by Session C's training budget.
 
+---
+
+**STAGE B -- SESSION B RESULT (2026-08-20): dilation recovers 91% of the oracle-vs-real gap at
+depth 2 with no retraining; `V_i` WORKS and four prior "it is dead" conclusions were a threshold
+error; the refinement ceiling was mis-specified and must be re-run.** All three runs completed in
+one Kaggle batch (~9 h). Artifacts in `results/phase3/experiments/experiment_stage_B_run_1/`.
+Checkpoint unchanged: `checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt`.
+
+The reproduction gate passed first: a 3-scene smoke reproduced the committed Stage A output
+**144/144 rows byte-identically** at `dilate_ms == 0`, so every number below sits on verified code.
+That gate was the one fatal assertion in the batch, deliberately.
+
+#### Q1 -- overlap dilation: the gap is a MASK problem, and it is mostly fixable for free
+
+Two runs. First a **mask-only curve** (no extractor, no encoder -- pure geometry, 3 min for 25
+scenes, ~1/30th the cost of measuring the same points in SI-SDR), which repriced the whole
+experiment before any GPU time went into it:
+
+| dilate (ms) | 0 | 25 | 50 | 100 | 200 | 400 | 800 | 1600 | 3200 |
+|---|---|---|---|---|---|---|---|---|---|
+| overlap recall | 0.774 | 0.788 | 0.802 | 0.828 | 0.876 | 0.946 | 0.989 | 0.998 | 1.000 |
+| false alarm | 0.0000 | 0.0000 | 0.0000 | 0.0001 | 0.0003 | 0.0026 | 0.0149 | 0.0451 | 0.1077 |
+| min solo left | 24.6 s | | | | 23.0 s | 22.0 s | 20.8 s | 19.3 s | 16.3 s |
+| scenes starved | 0/25 | | | | 0/25 | 0/25 | 0/25 | 0/25 | 0/25 |
+
+**Recall reaches 1.000.** The missed overlap is boundary-recoverable, not bulk non-detection --
+just at a ~400-800 ms scale (marginal gain per doubling peaks at +7.02 pts over 200->400 ms, then
+collapses to +0.87 at 800->1600). That scale matches pyannote's minimum-duration constraints
+trimming short overlap incursions. **Enrollment never starves**, at any value: these are 2-minute
+scenes with 20-40 s of solo per speaker, so even a 3.2 s dilation barely dents it. The binding
+constraint is false alarm, not enrollment -- the opposite of what the config was written to guard
+against, whose grid `[0, 10, 25, 50, 100, 200]` would have topped out at recall 0.876 and captured
+about half the available gain. Do the cheap geometry curve before the expensive sweep.
+
+Then the SI-SDR sweep on the re-chosen grid (25 scenes, `no_recursion`, absolute dB):
+
+| dilate | oracle d1 | oracle d2 | real d1 | real d2 |
+|---|---|---|---|---|
+| 0 | 47.03 | 1.69 | 40.30 | -1.29 |
+| 200 | 13.85 | 1.70 | 37.92 | 0.02 |
+| 400 | 8.92 | 1.71 | 25.50 | 1.02 |
+| 800 | 3.16 | 1.71 | 10.27 | **1.41** |
+
+Paired against the **oracle 0 ms baseline** -- the actual target, since that is the ideal the real
+arm is trying to reach:
+
+| dilate | depth 2 | win | depth 1 | win |
+|---|---|---|---|---|
+| 0 | -2.98 +-0.27 | 9% | -6.73 +-1.20 | 24% |
+| 200 | -1.67 +-0.20 | 12% | -9.11 +-1.48 | 24% |
+| 400 | -0.67 +-0.17 | 32% | -21.52 +-1.74 | 8% |
+| 800 | **-0.28 +-0.15** | **52%** | -36.76 +-1.22 | 0% |
+
+The 0 ms row reproduces Stage A (-2.98 on 25 scenes vs -3.11 on 50). **At 800 ms the real arm hits
+a 52% win rate against oracle diarization at depth 2** -- statistically indistinguishable from
+perfect masks, with no retraining. 91% of the gap, from one config key.
+
+**Three findings, and the second is the one for the paper:**
+
+1. **Missed overlap was the whole story, and it is recoverable at the mask level.** Stage A
+   attributed the gap to the predicted masks; this confirms it and fixes most of it.
+2. **The oracle arm turned CLAUDE.md §2's "copy, don't separate" from an assertion into a
+   measurement.** Dilating *exact* masks drops depth 1 from **47.03 -> 3.16 dB**: a **43.9 dB**
+   price for running `G` over already-clean audio. That rule has been asserted since Phase 0 and
+   had never been priced. This is why the oracle arm was swept too rather than only the real one --
+   it isolates the pure over-extraction cost with no diarization error in it.
+3. **Extra context for `G` is worth +0.02 dB.** Oracle depth 2 is flat across the sweep
+   (1.69 -> 1.71). Phase 1's recorded limitation -- "``x_O`` is built with a hard binary mask, so
+   ``G`` never sees context beyond the overlap region... scheduled to be revisited" -- is a
+   non-issue. Closed, free.
+
+**The catch, and why the dB numbers mislead here.** Depth 1 collapses. But depth-1 SI-SDR starts at
+47 dB, where the error energy is ~1e-4 of signal, so corrupting even ~1% of samples multiplies
+error energy a hundredfold and costs 20 dB. **Near-perfect scores are fragile**, and the dB scale
+therefore massively over-weights degradation that is perceptually inaudible (47 dB and 25 dB both
+sound flawless) while under-weighting the depth-2 gain that is the difference between unusable and
+borderline usable.
+
+**This exposes a real reporting gap: there is no un-stratified, whole-output SI-SDR anywhere in
+this project**, and it is the number that decides the dilation operating point. §6.4 forbids
+reporting an aggregate *instead of* stratification -- not alongside it. Until it exists, the
+optimum is unknown; crude energy arithmetic puts it near 200-400 ms, but that is arithmetic, not a
+measurement. **Add it before choosing a value.** See §7.
+
+#### Q2 -- the refinement ceiling was MIS-SPECIFIED. Its number is void; the re-run is queued.
+
+The run executed and the ceiling was active (23 `ceiling_accept_gate_would_reject`, 139
+`ceiling_reject_gate_would_accept`). Deficit `coarse_to_fine - no_recursion` at depth 2, matched
+control on the same 25 scenes:
+
+| arm | standard gate | oracle ceiling |
+|---|---|---|
+| oracle | -0.59 +-0.15 (\|t\|=4.0) | -0.24 +-0.12 (\|t\|=2.0) |
+| real | -0.57 +-0.19 (\|t\|=3.1) | -0.37 +-0.17 (\|t\|=2.2) |
+
+**Read as a ceiling this is nonsense, and the nonsense is what exposed the bug.** An acceptance
+rule that only ever accepts improvements cannot do worse than accepting nothing -- and accepting
+nothing IS `no_recursion`, because refinement round 0 starts from the enrollment embeddings. The
+deficit must be >= 0. It was negative. A bound that cannot lose, losing.
+
+*Cause.* `make_oracle_accept_fn` scored candidates on the **whole waveform**; the table reports
+`si_sdr_by_depth` at **depth 2**. Different objectives, so the monotonicity argument never
+transferred. The mechanism is SI-SDR's scale invariance: it fits a scalar before measuring the
+residual, and which samples you include decides what that scalar becomes. Over the whole waveform
+~75% of the audio is a bit-exact solo copy, which pins the scalar near 1 and makes any *level*
+error in the overlap region cost full price; over the depth-2 slice the scalar floats and absorbs
+that level error for free. So a candidate that fixes `G`'s **level** while worsening its **shape**
+wins the first comparison and loses the second. That is what it kept picking.
+
+*Confirmed directly, not inferred.* Splitting speakers by whether the ceiling accepted anything:
+
+| | speakers | mean depth-2 delta |
+|---|---|---|
+| ceiling accepted nothing | 48 (oracle) / 44 (real) | **+0.000** (max abs delta 0.00e+00) |
+| ceiling accepted >= 1 round | 27 (oracle) / 31 (real) | **-0.674 / -0.886 dB** |
+
+Every accepted change -- each an improvement by the rule's own measure -- made the reported metric
+worse, and untouched speakers moved by *exactly* zero.
+
+**What survives from this run:**
+
+* The refinement plumbing is verified: untouched speakers are bit-identical to `no_recursion`.
+* The standard gate's deficit (-0.59 / -0.57 dB) replicates Phase 2 and Stage A on a third corpus.
+* **A genuine finding about the metric:** optimizing whole-waveform SI-SDR *actively harms*
+  extraction quality by 0.67-0.89 dB. Worth remembering before anything here is ever optimized
+  against a whole-output number.
+* The accept rate decomposition: the real gate accepts **70%**, the mis-specified oracle accepted
+  **31%**.
+
+**What does NOT survive:** the -0.24 / -0.37 figures are not a ceiling, and the question "does
+refinement have headroom?" is **unknown**, not answered. `refine.rounds: 0` stays the default on
+the strength of the standard-gate result, not on the ceiling.
+
+*Fixed 2026-08-20.* `make_oracle_accept_fn(row_sources, scoring_depth, min_depth=2)` now masks with
+the same `si_sdr_regionwise` that `si_sdr_by_depth` uses, so the rule optimizes exactly what is
+reported. `score_scene` passes the `scoring_depth` it already computes; no config changes, so the
+re-run is the same command (~1.7 h). Guarantee and its one limit: what cannot decrease is SI-SDR
+*pooled over depths >= min_depth*. The chain corpus has a single overlap depth, so pooled IS the
+reported per-depth number there; with several overlap depths an individual depth could still move
+while the pool improves. Six tests added (440 passed / 1 skipped), including
+`TestTheCeilingCannotLose` -- the end-to-end monotonicity guard that would have caught this, and
+which did not exist -- plus a fixture that pits the two objectives against each other explicitly
+(whole-waveform 13.06 vs 20.97, depth-2 slice 33.98 vs 13.98 on the same pair of waveforms). Note
+the first version of *that* fixture did not actually disagree, and a deliberate guard-the-guard
+test caught it; without it the regression test would have passed for the wrong reason.
+
+#### Q3 -- `V_i` WORKS. The threshold was wrong by 500x. And the margin may not work at all.
+
+First run of `tune_gate.py` in the project's history, on a long-scene **dev-clean** split
+(50 scenes, verified disjoint from test: 40 test speakers, 39 dev, 0 shared).
+
+**`mean_variance` (`V_i`) -- contaminated vs honest enrollment:**
+
+| threshold | detection | false rej. | J |
+|---|---|---|---|
+| 1e-5 | 100.0% | 98.0% | +0.020 |
+| **1e-4** | **45.3%** | **7.9%** | **+0.373** |
+| >= 5e-4 | 0.0% | 0.0% | 0.000 |
+
+Medians: honest **0.00005**, contaminated **0.00010**. n = 151 honest / 148 contaminated.
+J = +0.373, comfortably over `tune_gate.py`'s 0.1 refusal bar.
+
+**Every config in this repo ships `max_mean_variance: 0.05` -- 500x above the entire usable range.**
+That is the whole explanation for four separate "V_i is structurally dead" conclusions (Phase 2
+close-out x2, Stage A, and the config comments). Each observation was correct -- `mean_variance` is
+nonzero but never exceeds ~3e-4 -- and each *inference* from it was wrong. The check was never
+dead; it was never switched on.
+
+Two things to be precise about, because "V_i works" is easy to over-read:
+* it catches **under half** of contaminated enrollments at a 7.9% false-rejection cost -- a partial
+  detector, not a solved problem;
+* the usable window is **one order of magnitude wide** (1e-5 and 5e-4 both give J ~ 0), so the
+  value will not transfer across corpora or checkpoints without re-tuning. Re-run `tune_gate.py`
+  whenever either changes.
+
+**`margin` (`M_i`) -- swapped vs correct conditioning:** best J = **+0.046** (at 0.3: 19.9%
+detection, 15.2% false rejection) -> `NO USABLE THRESHOLD`. Medians: correct **0.43873**, swapped
+**0.41965**. So the one check believed to be working is barely separating the populations --
+consistent with `gated_deflation` collapsing onto `ungated_deflation` at 98-99% accept, and with
+the refinement gate rubber-stamping 70%.
+
+**DO NOT ACT ON THE MARGIN RESULT YET.** The swapped fixture conditions `G` on a neighbour's
+embedding and asks the margin to notice. That only tests the margin if `G` actually *responds* to
+its conditioning. If this checkpoint does not steer, `G(x_O, e_j)` and `G(x_O, e_i)` are the same
+waveform, the fixture hands the margin two identical signals, and J ~ 0 is arithmetic rather than a
+finding. Phase 1 measured 12.8 dB of steering (diag +5.80 vs off-diag -6.95) -- but on the *Phase 1*
+checkpoint; clip50 is the curriculum checkpoint at roughly 13% of that per-depth exposure, and a
+collapsed-to-passthrough extractor gave a 0.16 dB margin in Phase 1's own failure mode.
+`scripts/probe_phase1_conditioning.py` separates the two in minutes with no training, and
+`tune_gate.py`'s own refusal message says to check the fixture before suspecting the diagnostic.
+**Run the probe on clip50 before treating the margin as broken.**
+
+Finding 1 has no such dependency: the `V_i` fixture contaminates *enrollment*, which never routes
+through `G`.
+
+Rejections were `margin` only (67 for `coarse_to_fine`); vad and artifact stayed inert, as in every
+prior run.
+
+#### Next actions, in order
+
+1. **Conditioning probe on clip50** -- minutes, no training. Decides whether Q3's margin half is a
+   finding or a void fixture, and bears on every gated result in Phase 2.
+2. **Add un-stratified whole-output SI-SDR** to the score rows (§7). Without it the dilation
+   operating point cannot be chosen.
+3. **Re-run B2** with the corrected ceiling (~1.7 h). The headroom question is currently unknown.
+4. **Re-run the dilation sweep** reading the new overall metric, grid `[0, 100, 200, 400]`.
+5. **Set `max_mean_variance: 1e-4`** and re-run a gated comparison -- `V_i` firing for the first
+   time changes what `gated_deflation` means.
+
 ### ☐ Phase 4 — Real corpora + full ablation
 
 **Goal:** the results section.
@@ -1739,6 +1983,25 @@ for the proposed system.
     what rescued Phase 2's fig2 when the `no_recursion` control stopped being flat.
   - **Report the win rate beside the mean.** A positive mean at a ~50% win rate is a few large
     wins, not broad superiority — that was literally Phase 1's result.
+  - **Near-perfect SI-SDR is FRAGILE, and dB over-weights damage to it.** At 47 dB the error energy
+    is ~1e-4 of signal, so corrupting ~1% of samples multiplies it a hundredfold and costs ~20 dB —
+    while 47 dB and 25 dB are equally inaudible. Depth-1 (solo-copy) rows live in exactly this
+    regime. A large dB drop there is not automatically a large harm; say so rather than letting the
+    number speak. Stage B's dilation sweep is the worked case.
+  - **Which SLICE you score decides what SI-SDR rewards, because it is scale-invariant.** SI-SDR
+    fits a scalar before measuring the residual, and the samples you include determine that scalar.
+    Score the whole output and a bit-exact solo copy pins it near 1, so a *level* error in the
+    overlap region costs full price; score the overlap slice alone and the scalar floats and
+    absorbs that error for free. The two rank estimates differently — by 8 and 20 dB in opposite
+    directions on Stage B's test fixture. **Any rule that selects, gates, or optimizes must score
+    the same slice the claim is reported on.** Getting this wrong voided Stage B's refinement
+    ceiling; `dagger/refine/oracle_ceiling.py` documents the failure.
+  - **The un-stratified, whole-output number is MISSING and should be added.** Every metric here is
+    per-depth, which §6.4 rightly requires — but stratify-only leaves questions like "is dilating
+    net better?" unanswerable, since the gain and the cost land in different rows with no exchange
+    rate between them. §6.4 forbids reporting an aggregate *instead of* stratification, not
+    alongside it. Add `si_sdr(output, target)` over the whole waveform as one extra row per
+    (scene, speaker) and report both.
   - **`|t| ≳ 2`** as a reading heuristic for "unlikely to be chance." Effect size and significance
     are separate questions and both get reported: Phase 2's accumulation decline is solidly
     non-chance (`t = −4.5`) *and* 3× smaller than the prior checkpoint's.
@@ -1758,15 +2021,16 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-08-18 — Phase 3 Stage B **Session A** landed (see §5 Phase 3): every
-Stage B component is written and unit-tested offline (suite **434 passed / 1 skipped**), and
-the Stage A result CSVs are now committed under `results/phase3/experiments/`. The one item
-that needed no models — the `aggregate_phase3._table` pairing fix — has been applied to those
-CSVs, and the corrected `real - oracle` accumulation table (n = 34/28/16 → **100/100/100**,
-SEM roughly halved) supersedes the original. The three measurement runs (dilation sweep,
-refinement ceiling, gate tuning) have configs ready but are **NOT run** — they need TitaNet,
-the extractor and pyannote on real audio, i.e. a Kaggle session; the local machine has none
-of them. Stage A's headline is unchanged: **-3.11 dB at depth 2**, caused by the predicted
-activity masks (missed overlap), not the deflation order. Phase 1 and Phase 2 DoDs remain met
-and unaffected. Per-phase history lives in §5, not here — this footer is deliberately kept to
-a few lines so it cannot drift out of sync with it.*
+*Last updated: 2026-08-20 — Phase 3 Stage B **Session B** landed (see §5 Phase 3; suite **440
+passed / 1 skipped**). Three results, two of which overturn standing conclusions. (1) **Overlap
+dilation recovers 91% of the oracle-vs-real gap at depth 2** (-2.98 → **-0.28 dB**, 52% win rate
+against oracle diarization) with no retraining — and the oracle arm priced §2's "copy, don't
+separate" at **43.9 dB** for the first time. (2) **`V_i` works**: J = +0.373 at a **1e-4**
+threshold, so the four prior "structurally dead" conclusions were a threshold error — the shipped
+`0.05` sits 500× above the usable range. `tau_margin` scores J = +0.046, but that is **pending a
+conditioning probe** on the clip50 checkpoint, since the fixture is void if `G` does not steer.
+(3) The **refinement ceiling was mis-specified** — it scored the whole waveform while the table
+reported depth 2 — so its number is void and the headroom question is *unknown*; fixed and queued
+for re-run. Stage A's headline is unchanged and now explained. Phase 1 and Phase 2 DoDs remain met;
+Phase 2's gated-vs-ungated results are flagged pending the probe. Per-phase history lives in §5,
+not here — this footer is deliberately kept to a few lines so it cannot drift out of sync with it.*

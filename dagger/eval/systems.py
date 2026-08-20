@@ -303,7 +303,15 @@ def score_scene(
         # Built from the ALREADY-RESTRICTED targets, so row i here is the same
         # row i the refiner sees. Ground truth reaches only the accept/reject
         # decision; the audio is still G(x_O, e) per CLAUDE.md §1.
-        refine_accept_fn = make_oracle_accept_fn([target for _, target in targets])
+        #
+        # `scoring_depth` is passed so the rule optimizes the SAME slice the
+        # results table reports. Without it the ceiling scored the whole
+        # waveform, whose SI-SDR is dominated by the bit-exact solo copy -- a
+        # different objective, under which the bound is not a bound. It came in
+        # BELOW no_recursion on 2026-08-19 for exactly that reason.
+        refine_accept_fn = make_oracle_accept_fn(
+            [target for _, target in targets], scoring_depth
+        )
 
     refined_embeddings, round_results = refine_embeddings(
         x, x_O, activity, solo, embeddings, variances, extractor, encoder, scene.sample_rate,
