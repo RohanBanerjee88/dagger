@@ -33,6 +33,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from pathlib import Path
 
@@ -42,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dagger.metrics.phase2_scores import (
     SYSTEMS,
+    clip_score,
     load_score_rows,
     mean_sem,
     paired_rows_by_field,
@@ -124,6 +126,75 @@ def _table(rows: list[dict], left: str, right: str, x_field: str) -> list[str]:
     return lines + [""]
 
 
+def _load_overall(csv_paths):
+    """Load the sibling ``_overall.csv`` for each score CSV, if it exists.
+
+    Not a CLI argument: the un-stratified file always sits beside the score file
+    that produced it, and making the caller name both invites the two being
+    mismatched -- an overall table paired against a different run's per-depth
+    table would be a plausible-looking, wrong report.
+
+    Silently absent is fine and expected: every Phase 3 CSV written before
+    2026-08-20 predates the metric.
+    """
+    rows = []
+    for path in csv_paths:
+        sibling = path.with_name(path.stem + "_overall.csv")
+        if not sibling.is_file():
+            continue
+        with open(sibling, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    row["si_sdr"] = float(row["si_sdr"])
+                except (TypeError, ValueError):
+                    continue
+                row["dilate_ms"] = float(row.get("dilate_ms") or 0.0)
+                row["source"] = path.name
+                rows.append(row)
+    return rows
+
+
+def _overall_table(rows: list[dict], left: str, right: str) -> list[str]:
+    """The un-stratified gap: ``left - right`` on the whole output track.
+
+    Paired on (source, scene, speaker, system, dilate_ms) -- no depth, because
+    there is no depth. This is the number that says whether a configuration is
+    NET better; the per-depth tables say where the difference lives. §6.4 wants
+    both, and forbids only reporting this one instead of them.
+    """
+    if not rows:
+        return ["(no `_overall.csv` beside these score CSVs -- this metric was",
+                "added 2026-08-20, so earlier runs do not have it)", ""]
+
+    def key(r):
+        return (r["source"], r["scene"], r["speaker"], r["system"], r["dilate_ms"])
+
+    lhs = {key(r): r["si_sdr"] for r in rows if r.get("diarization") == left}
+    rhs = {key(r): r["si_sdr"] for r in rows if r.get("diarization") == right}
+
+    buckets: dict[str, list[float]] = {}
+    for k in lhs:
+        if k in rhs:
+            a, b = clip_score(lhs[k]), clip_score(rhs[k])
+            if a is not None and b is not None:
+                buckets.setdefault(k[3], []).append(a - b)
+
+    lines = ["| system | n | mean (dB) | SEM | win rate | \\|t\\| |",
+             "|---|---|---|---|---|---|"]
+    any_row = False
+    for system_name in SYSTEMS:
+        diffs = buckets.get(system_name)
+        if not diffs:
+            continue
+        any_row = True
+        mean, sem, n, wins, tstat = _stats(diffs)
+        lines.append(f"| {system_name} | {n} | {mean:+.2f} | {sem:.2f} | "
+                     f"{wins:.0%} | {tstat:.1f} |")
+    if not any_row:
+        return ["(no paired overall rows for this comparison)", ""]
+    return lines + [""]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", nargs="+", type=Path, help="run_phase3.py score CSV(s)")
@@ -131,6 +202,7 @@ def main() -> int:
     args = parser.parse_args()
 
     rows = load_score_rows(args.csv, required_columns=("m", "diarization"))
+    overall_rows = _load_overall(args.csv)
     arms = sorted({r["diarization"] for r in rows if r["diarization"]})
     if "oracle" not in arms:
         raise SystemExit(
@@ -169,6 +241,14 @@ def main() -> int:
             lines += [f"## `{left}` - `{right}`", "", "(arm not present in this run)", ""]
             continue
         lines += [f"## `{left}` - `{right}` -- {blurb}", ""]
+        lines += [
+            "### overall (un-stratified, whole output track)", "",
+            "Is this arm NET better or worse? The per-depth tables below say",
+            "*where* the difference lives; this one says whether it adds up.",
+            "Never read it INSTEAD of them (§6.4), and never optimize against it:",
+            "it is scale-anchored by the bit-exact solo copy.", "",
+        ]
+        lines += _overall_table(overall_rows, left, right)
         lines += ["### by overlap depth", ""]
         lines += _table(rows, left, right, "depth")
         lines += [

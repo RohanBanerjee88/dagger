@@ -72,7 +72,7 @@ class TestDepthComesFromTheReference:
         merged = scene_regions(scene, _MergingDiarizer())
         assert int(merged.depth.max()) == 1, "fixture must collapse to one cluster"
 
-        rows, _ = _run(scene, _MergingDiarizer())
+        rows, _, _ = _run(scene, _MergingDiarizer())
         depths = {int(r["depth"]) for r in rows}
         # Bucketed by the TRUE count, so the hard samples stay in the hard row
         # even though the diarizer believed the whole scene was solo.
@@ -85,8 +85,8 @@ class TestDepthComesFromTheReference:
         """The precondition for pairing: `depth 2` must name the same samples
         in every arm, or the cross-arm difference compares different audio."""
         scene = three_speaker_scheduled_scene
-        oracle_rows, _ = _run(scene, OracleDiarizer())
-        real_rows, _ = _run(scene, FakeDiarizer(jitter=0.05))
+        oracle_rows, _, _ = _run(scene, OracleDiarizer())
+        real_rows, _, _ = _run(scene, FakeDiarizer(jitter=0.05))
 
         oracle_depths = {int(r["depth"]) for r in oracle_rows}
         real_depths = {int(r["depth"]) for r in real_rows}
@@ -101,7 +101,7 @@ class TestTheAudioPathIsStillDiarizerDriven:
         self, three_speaker_scheduled_scene
     ):
         scene = three_speaker_scheduled_scene
-        rows, _ = _run(scene, _MergingDiarizer())
+        rows, _, _ = _run(scene, _MergingDiarizer())
         # One cluster found -> one track reconstructed, even though the reference
         # says three speakers. Ground truth changed the BUCKET, not the method.
         assert {int(r["m"]) for r in rows} == {1}
@@ -115,7 +115,7 @@ class TestTheAudioPathIsStillDiarizerDriven:
         Reading this off the 2026-08-16 run took a forensic pass over the CSV.
         """
         scene = three_speaker_scheduled_scene
-        rows, _ = _run(scene, FakeDiarizer(extra_cluster=True))
+        rows, _, _ = _run(scene, FakeDiarizer(extra_cluster=True))
         n_clusters = {int(r["n_clusters"]) for r in rows}
         m = {int(r["m"]) for r in rows}
         assert n_clusters == {4}, "the invented cluster should be counted"

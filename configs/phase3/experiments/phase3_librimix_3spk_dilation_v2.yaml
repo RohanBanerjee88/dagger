@@ -1,0 +1,100 @@
+# Phase 3 Stage B: the dilation sweep, RE-RUN to choose an operating point.
+#
+# WHY A SECOND CONFIG RATHER THAN RE-RUNNING THE FIRST.
+# Identical to `phase3_librimix_3spk_dilation_sweep.yaml` except `eval.tag`.
+# Re-running that one would OVERWRITE the committed run-1 results, and run 1's
+# dilation table is the phase's headline finding (91% of the oracle-vs-real gap
+# closed at depth 2, with no retraining). It has to stay on disk and keep
+# reproducing from its own config.
+#
+# WHAT IS ACTUALLY DIFFERENT: THE CODE, NOT THE CONFIG.
+# Run 1 predates the un-stratified metric, so its CSVs have no `_overall.csv`.
+# That is precisely why the operating point could not be chosen from it:
+#
+#     dilate    depth 2 gap      depth 1 gap
+#     0 ms      -2.98 dB         -6.73 dB
+#     200 ms    -1.67 dB         -9.11 dB
+#     400 ms    -0.67 dB        -21.52 dB
+#     800 ms    -0.28 dB        -36.76 dB
+#
+# The gain and the cost land in different rows with no exchange rate between
+# them. `{stem}_overall.csv` is that exchange rate, and this run exists to
+# produce it. Nothing else about the experiment changes.
+#
+# WHY THE GRID IS UNCHANGED at [0, 200, 400, 800]. It already spans the knee the
+# mask curve found (recall 0.774 -> 0.876 -> 0.946 -> 0.989), and keeping it
+# identical makes every row directly comparable with run 1 -- so the only new
+# information is the overall column, and any difference in the per-depth numbers
+# would be a red flag rather than a variable. Add a 100 ms point only if the
+# overall optimum lands at 200 and the low end needs localising.
+#
+# READ THE DEPTH-1 COLUMN WITH CARE, NOT LITERALLY. Depth-1 SI-SDR starts at
+# ~47 dB, where error energy is ~1e-4 of signal, so corrupting ~1% of samples
+# costs ~20 dB. 47 dB and 25 dB are equally inaudible. The dB scale therefore
+# over-weights depth-1 damage and under-weights the depth-2 gain, which is the
+# difference between unusable and borderline usable. The overall number is the
+# one to decide on -- but do NOT then optimize anything against it: it is
+# scale-anchored by the bit-exact solo copy (see dagger/eval/systems.py's
+# OVERALL_FIELDS, and dagger/refine/oracle_ceiling.py for what happened the last
+# time a rule optimized a whole-waveform score).
+#
+# BUDGET. 25 scenes x 2 arms x 4 dilations = 200 scene-arm-dilation units. At the
+# 120 s/unit measured on a T4, that is ~6.7 h -- most of a session on its own.
+# The other two queued runs are ~1.7 h (B2 ceiling, 25x2) and ~5.0 h (vi_on,
+# 50x3), so all three do NOT fit in one 12 h session. Either give this its own
+# session, or drop `limit` to 15 (~4.0 h) and accept the wider SEM.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_dilation_v2.yaml
+#   python scripts/aggregate_phase3.py \
+#       results/phase3/experiments/phase3_librimix_3spk_dilation_v2.csv \
+#       --out results/phase3/experiments/phase3_gap_dilation_v2.md
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 25
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  arms: [oracle, real]
+  dilate_overlap_ms: [0, 200, 400, 800]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# Untuned defaults, deliberately unchanged from run 1: this run varies the
+# reporting metric, not the pipeline. `V_i` at 1e-4 is tested separately by
+# phase3_librimix_3spk_vi_on.yaml so the two effects stay attributable.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 2
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: dilation_v2

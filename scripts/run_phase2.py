@@ -374,7 +374,11 @@ def main() -> int:
     skipped: list[tuple[str, str]] = []
     for scene in dataset:
         try:
-            scene_rows, scene_gate_rows = score_scene(
+            # Third element is the un-stratified overall rows (Phase 3 writes
+            # them to `_overall.csv`). Deliberately dropped here: Phase 2's
+            # committed CSVs must stay byte-identical, so this script's
+            # outputs are left exactly as they were.
+            scene_rows, scene_gate_rows, _ = score_scene(
                 scene, fade, enroll_k, min_clip_ms, enroll_budget_ms,
                 encoder, extractor, gate_cfg, refine_rounds,
             )

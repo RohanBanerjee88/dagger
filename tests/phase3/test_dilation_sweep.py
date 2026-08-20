@@ -127,7 +127,7 @@ class TestTheDiarizerIsPaidForOnce:
 class TestRowsCarryTheirSweepPoint:
     def test_every_row_is_stamped(self, three_speaker_scheduled_scene, monkeypatch):
         values = (0.0, 25.0, 100.0)
-        rows, gate_rows, diar_rows = _run(
+        rows, gate_rows, diar_rows, _ = _run(
             three_speaker_scheduled_scene, ["oracle"], monkeypatch,
             dilate_ms_values=values, refine_rounds=1,
         )
@@ -136,7 +136,7 @@ class TestRowsCarryTheirSweepPoint:
 
     def test_dilation_changes_the_scores(self, three_speaker_scheduled_scene, monkeypatch):
         """A sweep whose points are identical would be measuring nothing."""
-        rows, _, _ = _run(
+        rows, _, _, _ = _run(
             three_speaker_scheduled_scene, ["oracle"], monkeypatch,
             dilate_ms_values=(0.0, 200.0),
         )
@@ -162,7 +162,7 @@ class TestRowsCarryTheirSweepPoint:
         If it did, the knob would be grading its own homework: an audio-path
         choice would change the diarization-quality number used to explain it.
         """
-        _, _, diar_rows = _run(
+        _, _, diar_rows, _ = _run(
             three_speaker_scheduled_scene, ["oracle", "real"], monkeypatch,
             diarizer=FakeDiarizer(jitter=0.1), dilate_ms_values=(0.0, 150.0),
         )
@@ -177,7 +177,7 @@ class TestRowsCarryTheirSweepPoint:
         self, three_speaker_scheduled_scene, monkeypatch
     ):
         """The quantity the knob targets, and the cost it pays for it."""
-        _, _, diar_rows = _run(
+        _, _, diar_rows, _ = _run(
             three_speaker_scheduled_scene, ["oracle", "real"], monkeypatch,
             diarizer=FakeDiarizer(jitter=0.2), dilate_ms_values=(0.0, 200.0),
         )
@@ -204,7 +204,7 @@ class TestAggressiveDilationDoesNotPoisonTheBaseline:
         scene = three_speaker_scheduled_scene
         huge = 1000.0 * scene.mixture.shape[0] / scene.sample_rate  # whole scene
 
-        rows, _, _ = _run(
+        rows, _, _, _ = _run(
             scene, ["oracle"], monkeypatch,
             dilate_ms_values=(0.0, huge), dilation_failures=failures,
         )
@@ -230,7 +230,7 @@ class TestReportsUseTheBaselineOnly:
 
         rows = [row(0.0, 10.0), row(50.0, -10.0)]
         run_phase3._write_results(
-            rows, [], [], tmp_path, "stem", ["oracle"], n_scenes=1,
+            rows, [], [], [], tmp_path, "stem", ["oracle"], n_scenes=1,
         )
         text = (tmp_path / "stem.md").read_text()
 

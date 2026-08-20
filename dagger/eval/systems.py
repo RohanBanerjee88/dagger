@@ -32,7 +32,7 @@ from dagger.audio.provenance import original_mixture
 from dagger.diarize.oracle import overlap_depth, overlap_mixture
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.gate.confidence import confidence_gate
-from dagger.metrics.sisdr import si_sdr_by_depth
+from dagger.metrics.sisdr import si_sdr, si_sdr_by_depth
 from dagger.reconstruct.deflation import reconstruct_all_deflation
 from dagger.reconstruct.stitch import reconstruct_all
 from dagger.refine.coarse_to_fine import refine_embeddings
@@ -47,6 +47,28 @@ DEFLATION_SYSTEMS = ("ungated_deflation", "gated_deflation")
 
 SCORE_FIELDS = [
     "scene", "speaker", "system", "m", "depth", "si_sdr",
+    "deflation_index", "n_accepted_before", "refine_rounds",
+]
+# The un-stratified, whole-output number (CLAUDE.md §7). Its own file at its own
+# grain -- one row per (scene, speaker, system), NOT per depth -- for the same
+# reason gate decisions live apart: a depth-stratified table that silently
+# absorbed a whole-output row would report a mean over a pipeline, labelled as a
+# depth. This project has shipped that mistake three times (the +-inf drop, the
+# `dilate_ms` sweep, the ceiling's objective), so the grain is enforced by file
+# separation rather than by remembering to filter.
+#
+# What it answers: "is this configuration net better?" -- unanswerable from
+# per-depth rows alone, because a gain and its cost land in different rows with
+# no exchange rate between them. Stage B's dilation sweep is the worked case:
+# +2.19 dB at depth 2 against -29.85 dB at depth 1, with no way to net them.
+#
+# CAUTION, and it is not optional. This number is SCALE-ANCHORED by the
+# bit-exact solo copy that dominates most outputs, so it rewards fixing a level
+# error over fixing a shape error. It is a REPORTING number only -- never a
+# selection, gating or optimization target. Using it as one is exactly what
+# voided Stage B's refinement ceiling (see dagger/refine/oracle_ceiling.py).
+OVERALL_FIELDS = [
+    "scene", "speaker", "system", "m", "si_sdr",
     "deflation_index", "n_accepted_before", "refine_rounds",
 ]
 # Gate decisions live in their own file, at their own grain: one per (scene,
@@ -152,7 +174,7 @@ def score_scene(
     order_policy: str = "variance",
     on_unenrollable: str = "raise",
     refine_oracle_ceiling: bool = False,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict]]:
     """Run all four systems on one scene.
 
     Returns ``(score_rows, gate_rows)`` -- one score row per (speaker, depth,
@@ -325,6 +347,7 @@ def score_scene(
     )
 
     rows = []
+    overall_rows = []
     for system_name in SYSTEMS:
         system_outputs = outputs[system_name]
         is_deflation = system_name in DEFLATION_SYSTEMS
@@ -335,6 +358,24 @@ def score_scene(
                 # nothing to score it against. Reported as a spurious cluster in
                 # the diarization diagnostics, not silently dropped.
                 continue
+            # The un-stratified number, scored over the WHOLE output track
+            # against the whole true source. Outside a speaker's activity the
+            # reconstruction is exactly 0 by construction (w_Ei + w_Oi ==
+            # activity_i), so this pools every depth for that speaker without
+            # also scoring silence the pipeline never claimed.
+            overall_rows.append({
+                "scene": scene.name,
+                "speaker": label,
+                "cluster": cluster,
+                "n_clusters": n_clusters,
+                "system": system_name,
+                "m": num_speakers,
+                "si_sdr": si_sdr(system_outputs[i], target),
+                "deflation_index": deflation_idx[i] if is_deflation else None,
+                "n_accepted_before": n_accepted_before[system_name][i] if is_deflation else None,
+                "refine_rounds": refine_rounds if system_name == "coarse_to_fine" else 0,
+            })
+
             by_depth = si_sdr_by_depth(system_outputs[i], target, scoring_depth)
             for k, score in by_depth.items():
                 rows.append({
@@ -405,7 +446,7 @@ def score_scene(
                 })
             gate_rows.append(row)
 
-    return rows, gate_rows
+    return rows, gate_rows, overall_rows
 
 
 def _score_targets(

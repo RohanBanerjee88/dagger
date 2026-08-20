@@ -89,19 +89,19 @@ def _run(scene, arms, monkeypatch, *, diarizer=None, refine_rounds=0):
 class TestArmsProduceDistinctLabelledRows:
     def test_every_arm_is_tagged_and_present(self, three_speaker_scheduled_scene, monkeypatch):
         arms = ["oracle", "real", "real_index_order"]
-        rows, gate_rows, diar_rows = _run(three_speaker_scheduled_scene, arms, monkeypatch)
+        rows, gate_rows, diar_rows, _ = _run(three_speaker_scheduled_scene, arms, monkeypatch)
 
         assert {r["diarization"] for r in rows} == set(arms)
         assert {r["diarization"] for r in gate_rows} == set(arms)
         assert {r["diarization"] for r in diar_rows} == set(arms)
 
     def test_oracle_arm_scores_a_perfect_der(self, three_speaker_scheduled_scene, monkeypatch):
-        _, _, diar_rows = _run(three_speaker_scheduled_scene, ["oracle"], monkeypatch)
+        _, _, diar_rows, _ = _run(three_speaker_scheduled_scene, ["oracle"], monkeypatch)
         assert diar_rows[0]["der"] == 0.0
         assert diar_rows[0]["n_missed_speakers"] == 0
 
     def test_real_arm_scores_a_nonzero_der(self, three_speaker_scheduled_scene, monkeypatch):
-        _, _, diar_rows = _run(
+        _, _, diar_rows, _ = _run(
             three_speaker_scheduled_scene, ["oracle", "real"], monkeypatch,
             diarizer=FakeDiarizer(jitter=0.25),
         )
@@ -123,7 +123,7 @@ class TestOrderPolicyIsIsolated:
     def test_order_independent_systems_are_identical_across_the_two_arms(
         self, three_speaker_scheduled_scene, monkeypatch, system
     ):
-        rows, _, _ = _run(
+        rows, _, _, _ = _run(
             three_speaker_scheduled_scene, ["oracle", "real", "real_index_order"], monkeypatch
         )
 
@@ -169,7 +169,7 @@ class TestCardinalityFailuresSurviveToTheReport:
     def test_a_dropped_speaker_is_reported_not_hidden(
         self, three_speaker_scheduled_scene, monkeypatch
     ):
-        _, _, diar_rows = _run(
+        _, _, diar_rows, _ = _run(
             three_speaker_scheduled_scene, ["oracle", "real"], monkeypatch,
             diarizer=FakeDiarizer(drop_speaker=1),
         )
@@ -180,7 +180,7 @@ class TestCardinalityFailuresSurviveToTheReport:
     def test_an_invented_speaker_is_reported_not_hidden(
         self, three_speaker_scheduled_scene, monkeypatch
     ):
-        rows, _, diar_rows = _run(
+        rows, _, diar_rows, _ = _run(
             three_speaker_scheduled_scene, ["oracle", "real"], monkeypatch,
             diarizer=FakeDiarizer(extra_cluster=True),
         )

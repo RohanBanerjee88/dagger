@@ -86,7 +86,7 @@ class TestForcedArmFailureIsContained:
         self, three_speaker_scheduled_scene, monkeypatch
     ):
         failures = {}
-        rows, _, _ = _run(three_speaker_scheduled_scene, ALL_ARMS, monkeypatch, failures)
+        rows, _, _, _ = _run(three_speaker_scheduled_scene, ALL_ARMS, monkeypatch, failures)
         present = {r["diarization"] for r in rows}
         assert "real_forced_m" not in present, "the failing arm produced rows"
         assert {"oracle", "real", "real_index_order"} <= present, \
@@ -105,7 +105,7 @@ class TestForcedArmFailureIsContained:
         """If forced-m quietly fell back, it would duplicate `real` exactly and
         `real_forced_m - real` would read 0 dB for the wrong reason."""
         failures = {}
-        rows, _, diar = _run(three_speaker_scheduled_scene, ALL_ARMS, monkeypatch, failures)
+        rows, _, diar, _ = _run(three_speaker_scheduled_scene, ALL_ARMS, monkeypatch, failures)
         assert not [r for r in rows if r["diarization"] == "real_forced_m"]
         assert not [r for r in diar if r["diarization"] == "real_forced_m"]
 
@@ -113,7 +113,7 @@ class TestForcedArmFailureIsContained:
         self, three_speaker_scheduled_scene, monkeypatch
     ):
         failures = {}
-        rows, _, _ = _run(three_speaker_scheduled_scene, ALL_ARMS, monkeypatch, failures)
+        rows, _, _, _ = _run(three_speaker_scheduled_scene, ALL_ARMS, monkeypatch, failures)
 
         def keyed(arm):
             return {(r["scene"], r["speaker"], r["depth"])

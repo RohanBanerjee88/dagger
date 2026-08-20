@@ -71,7 +71,9 @@ from dagger.diarize.oracle import OracleDiarizer
 from dagger.diarize.regions import dilate_overlap, scene_regions
 from dagger.enroll.encoder import TitaNetEncoder
 from dagger.enroll.topk import NoSoloRegionError
-from dagger.eval.systems import GATE_FIELDS, SCORE_FIELDS, SYSTEMS, score_scene
+from dagger.eval.systems import (
+    GATE_FIELDS, OVERALL_FIELDS, SCORE_FIELDS, SYSTEMS, score_scene,
+)
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
 from dagger.metrics.der import diarization_error_rate
 from dagger.metrics.phase2_scores import SI_SDR_CAP_DB, clip_score, mean_sem
@@ -96,6 +98,9 @@ PHASE3_SCORE_FIELDS = (
     ["diarization", "dilate_ms"] + SCORE_FIELDS + ["cluster", "n_clusters"]
 )
 PHASE3_GATE_FIELDS = ["diarization", "dilate_ms"] + GATE_FIELDS + ["cluster"]
+PHASE3_OVERALL_FIELDS = (
+    ["diarization", "dilate_ms"] + OVERALL_FIELDS + ["cluster", "n_clusters"]
+)
 
 DIAR_FIELDS = [
     "scene", "diarization", "dilate_ms", "m", "der", "miss_rate", "false_alarm_rate",
@@ -205,7 +210,7 @@ def score_scene_all_arms(
     dilate_ms_values: list[float] = (0.0,),
     refine_oracle_ceiling: bool = False,
     dilation_failures: dict | None = None,
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """Run every arm over one scene. Returns ``(score, gate, diarization)`` rows.
 
     The real diarizer runs **once per (uses-real, forced-m) combination**, not
@@ -226,6 +231,7 @@ def score_scene_all_arms(
     score_rows: list[dict] = []
     gate_rows: list[dict] = []
     diar_rows: list[dict] = []
+    overall_rows: list[dict] = []
 
     regions_cache: dict[tuple[bool, bool], object] = {}
 
@@ -267,7 +273,7 @@ def score_scene_all_arms(
             regions = dilate_overlap(base_regions, samples)
 
             try:
-                rows, gates = score_scene(
+                rows, gates, overalls = score_scene(
                     scene, fade, enroll_k, min_clip_ms, enroll_budget_ms,
                     encoder, extractor, gate_cfg, refine_rounds,
                     regions=regions, order_policy=order_policy,
@@ -304,9 +310,11 @@ def score_scene_all_arms(
                 score_rows.append({"diarization": arm, "dilate_ms": dilate_ms, **row})
             for row in gates:
                 gate_rows.append({"diarization": arm, "dilate_ms": dilate_ms, **row})
+            for row in overalls:
+                overall_rows.append({"diarization": arm, "dilate_ms": dilate_ms, **row})
             diar_rows.append(_diarization_row(scene, regions, arm, dilate_ms))
 
-    return score_rows, gate_rows, diar_rows
+    return score_rows, gate_rows, diar_rows, overall_rows
 
 
 def _clipped(rows: list[dict]) -> list[float]:
@@ -578,6 +586,51 @@ def _dilation_section(
     return lines
 
 
+def _overall_section(overall_rows: list[dict], arms: list[str]) -> list[str]:
+    """The un-stratified number: what a listener actually gets.
+
+    Reported ALONGSIDE the per-depth tables, never instead of them (CLAUDE.md
+    §6.4). It exists because stratify-only leaves "is this configuration net
+    better?" unanswerable -- a gain and its cost land in different rows with no
+    exchange rate between them.
+
+    Swept dilation values each get their own row here, and that is the whole
+    point: this is the only table in the file where the sweep points can be
+    compared against each other on one number.
+    """
+    if not overall_rows:
+        return []
+    lines = [
+        "", "## Overall SI-SDR (un-stratified, whole output track)", "",
+        "One row per (scene, speaker, system); no depth stratification. Read it",
+        "WITH the per-depth tables, never instead of them -- and never optimize",
+        "against it: it is anchored by the bit-exact solo copy, so it rewards",
+        "fixing a level error over fixing a shape error.", "",
+    ]
+    dilations = sorted({r["dilate_ms"] for r in overall_rows})
+    header = "| arm | system |" + "".join(f" {d:g} ms |" for d in dilations)
+    lines += [header, "|---" * (2 + len(dilations)) + "|"]
+    for arm in arms:
+        for system_name in SYSTEMS:
+            cells = []
+            for d in dilations:
+                vals = [
+                    clip_score(r["si_sdr"]) for r in overall_rows
+                    if r["diarization"] == arm and r["system"] == system_name
+                    and r["dilate_ms"] == d
+                ]
+                vals = [v for v in vals if v is not None]
+                if not vals:
+                    cells.append("n/a")
+                    continue
+                mean, sem, n = mean_sem(vals)
+                cells.append(f"{mean:.2f}±{sem:.2f}")
+            if all(c == "n/a" for c in cells):
+                continue
+            lines.append(f"| {arm} | {system_name} |" + "".join(f" {c} |" for c in cells))
+    return lines + [""]
+
+
 def _ordering_section(rows: list[dict], arms: list[str], depths: list[int]) -> list[str]:
     """Does the Phase 2 ordering survive real diarization?
 
@@ -615,6 +668,7 @@ def _write_results(
     rows: list[dict],
     gate_rows: list[dict],
     diar_rows: list[dict],
+    overall_rows: list[dict],
     out_dir: Path,
     stem: str,
     arms: list[str],
@@ -627,12 +681,17 @@ def _write_results(
     csv_path = out_dir / f"{stem}.csv"
     gate_csv_path = out_dir / f"{stem}_gate.csv"
     diar_csv_path = out_dir / f"{stem}_diar.csv"
+    overall_csv_path = out_dir / f"{stem}_overall.csv"
     md_path = out_dir / f"{stem}.md"
 
     for path, fields, payload in (
         (csv_path, PHASE3_SCORE_FIELDS, rows),
         (gate_csv_path, PHASE3_GATE_FIELDS, gate_rows),
         (diar_csv_path, DIAR_FIELDS, diar_rows),
+        # Its own file, at its own grain -- see OVERALL_FIELDS. Keeping it out of
+        # `{stem}.csv` is what makes it structurally impossible for a
+        # depth-stratified table to absorb it as an extra depth.
+        (overall_csv_path, PHASE3_OVERALL_FIELDS, overall_rows),
     ):
         with open(path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
@@ -707,6 +766,7 @@ def _write_results(
             pct = f"{100.0 * count / total:.0f}%" if total else "n/a"
             lines.append(f"| {arm} | {count} | {total} | {pct} |")
 
+    lines += _overall_section(overall_rows, arms)
     lines += _dilation_section(
         all_rows, diar_rows, depths, dilation_failures, n_scenes or 0
     )
@@ -727,7 +787,8 @@ def _write_results(
         "  `real_index_order` rows above separate the two.",
     ]
     md_path.write_text("\n".join(lines) + "\n")
-    print(f"wrote {csv_path}, {gate_csv_path}, {diar_csv_path} and {md_path}")
+    print(f"wrote {csv_path}, {gate_csv_path}, {diar_csv_path}, "
+          f"{overall_csv_path} and {md_path}")
 
 
 def main() -> int:
@@ -817,13 +878,14 @@ def main() -> int:
     rows: list[dict] = []
     gate_rows: list[dict] = []
     diar_rows: list[dict] = []
+    overall_rows: list[dict] = []
     skipped: list[tuple[str, str]] = []
     diarizer_cache: dict = {}
     arm_failures: dict[str, int] = {}
     dilation_failures: dict[tuple[str, float], int] = {}
     for scene in dataset:
         try:
-            scene_rows, scene_gate_rows, scene_diar_rows = score_scene_all_arms(
+            scene_rows, scene_gate_rows, scene_diar_rows, scene_overall_rows = score_scene_all_arms(
                 scene, arms, diarizer_cfg, device,
                 fade=fade, enroll_k=enroll_k, min_clip_ms=min_clip_ms,
                 enroll_budget_ms=enroll_budget_ms, encoder=encoder,
@@ -846,6 +908,7 @@ def main() -> int:
         rows.extend(scene_rows)
         gate_rows.extend(scene_gate_rows)
         diar_rows.extend(scene_diar_rows)
+        overall_rows.extend(scene_overall_rows)
         print(f"scored scene {scene.name!r} ({len(scene_rows)} rows across {len(arms)} arms)")
 
     if skipped:
@@ -869,7 +932,7 @@ def main() -> int:
     if tag:
         stem = f"{stem}_{tag}"
     results_dir = Path(cfg.get("eval", {}).get("results_dir", "results"))
-    _write_results(rows, gate_rows, diar_rows, results_dir, stem, arms,
+    _write_results(rows, gate_rows, diar_rows, overall_rows, results_dir, stem, arms,
                    arm_failures=arm_failures, n_scenes=len(dataset),
                    dilation_failures=dilation_failures,
                    refine_oracle_ceiling=refine_oracle_ceiling)

@@ -1115,8 +1115,12 @@ Headline the scratch number: it has clean single-command provenance *and* it is 
   > **PARTLY CORRECTED (2026-08-20):** structurally 0 under *oracle* regions, yes -- but not dead.
   > At a 1e-4 threshold on real diarization it scores J = +0.373; `0.05` is 500x too high. And the
   > 3,138 `margin` rejections counted here are now suspect from the other direction: the margin
-  > scored J = +0.046 ("no usable threshold") on the dev sweep. See Stage B Session B Q3, including
-  > why that margin result is itself pending a conditioning probe.
+  > scored J = +0.046 ("no usable threshold") on the dev sweep, and the conditioning probe has
+  > since CONFIRMED that verdict -- clip50 steers at 9.41 dB, so the fault fixture was valid and
+  > the margin genuinely fails to separate wrong-speaker output. **Treat these 3,138 rejections as
+  > close to noise**, and with them the Phase 2 gated-vs-ungated comparison: `gated_deflation`
+  > differs from `ungated_deflation` only where the margin fires, and the margin is not detecting
+  > what it is supposed to detect. See Stage B Session B Q3 and its follow-up.
 
 #### Absolute quality: a training-budget fact, and a Phase 4 input
 
@@ -1269,8 +1273,12 @@ and the variance becomes real. **The single load-bearing check on the smoke run 
 what arm 4 exists to separate.
 
 *Not yet done / known gaps.* Nothing has run against pyannote or real data. The clip50 checkpoint
-the DoD config points at is **not on the HF Hub** (only the Phase 1 and Phase 2-finetuned ones
-are), so a fresh Kaggle session must attach it as a dataset or re-upload it. ~~The dev split at
+the DoD config points at is ~~**not on the HF Hub** (only the Phase 1 and Phase 2-finetuned ones
+are), so a fresh Kaggle session must attach it as a dataset or re-upload it.~~ *(STALE. It has
+since been published as `AdityaAA2004/dagger-phase2-final-model`, Hub filename
+`phase2_final_model_weights.pt`; see README.md's checkpoint table. `checkpoints/` is gitignored, so
+every checkpoint must be fetched via `hf_hub_download` and copied to the path the configs expect --
+nothing arrives with a clone.)* ~~The dev split at
 `offset: 650` (`configs/phase2/experiments/phase2_gate_tune_dev.yaml`) **overlaps** rows
 [650, 800) of the clip50 training run, which used `limit: 800` — move it to `offset: 1000` before
 any Stage B gate tuning, or thresholds get tuned on scenes `G` trained on.~~ *(Fixed 2026-08-18 in
@@ -1567,9 +1575,10 @@ design already decided by measurement rather than by guess.
    queued (~1.7 h)**. The headroom question is currently *unknown*, not answered. See Session B Q2.
 3. ☒ **DONE. `tune_gate.py` on a long-scene dev split** (item 1) -- `V_i` scores **J = +0.373 at a
    1e-4 threshold**, overturning four "structurally dead" conclusions; the shipped `0.05` is 500x
-   too high. `tau_margin` scores J = +0.046 ("no usable threshold") but that result is **pending a
-   conditioning probe** on clip50, since the fixture is void if `G` does not steer. Thresholds NOT
-   yet frozen. See Session B Q3.
+   too high. `tau_margin` scores J = +0.046 ("no usable threshold"), and the conditioning probe
+   CONFIRMED the fixture was valid (clip50 steers at 9.41 dB), so the margin is genuinely not a
+   detector. Only `max_mean_variance: 1e-4` is worth freezing; `tau_margin` needs replacing rather
+   than re-tuning, and cannot be evaluated on this checkpoint anyway. See Session B Q3.
 4. ☒ **DONE. Fixed `aggregate_phase3._table`** so the accumulation stratification pairs before
    filtering. Applied to the committed Stage A CSVs; corrected numbers in the cautions table above.
 5. ☒ **DONE. Dropped `real_forced_m`** from `phase3_librimix_3spk_long.yaml`: identical to `real`
@@ -1863,7 +1872,7 @@ which did not exist -- plus a fixture that pits the two objectives against each 
 the first version of *that* fixture did not actually disagree, and a deliberate guard-the-guard
 test caught it; without it the regression test would have passed for the wrong reason.
 
-#### Q3 -- `V_i` WORKS. The threshold was wrong by 500x. And the margin may not work at all.
+#### Q3 -- `V_i` WORKS. The threshold was wrong by 500x. And the margin does NOT work.
 
 First run of `tune_gate.py` in the project's history, on a long-scene **dev-clean** split
 (50 scenes, verified disjoint from test: 40 test speakers, 39 dev, 0 shared).
@@ -1898,33 +1907,148 @@ detection, 15.2% false rejection) -> `NO USABLE THRESHOLD`. Medians: correct **0
 consistent with `gated_deflation` collapsing onto `ungated_deflation` at 98-99% accept, and with
 the refinement gate rubber-stamping 70%.
 
-**DO NOT ACT ON THE MARGIN RESULT YET.** The swapped fixture conditions `G` on a neighbour's
-embedding and asks the margin to notice. That only tests the margin if `G` actually *responds* to
-its conditioning. If this checkpoint does not steer, `G(x_O, e_j)` and `G(x_O, e_i)` are the same
-waveform, the fixture hands the margin two identical signals, and J ~ 0 is arithmetic rather than a
-finding. Phase 1 measured 12.8 dB of steering (diag +5.80 vs off-diag -6.95) -- but on the *Phase 1*
-checkpoint; clip50 is the curriculum checkpoint at roughly 13% of that per-depth exposure, and a
-collapsed-to-passthrough extractor gave a 0.16 dB margin in Phase 1's own failure mode.
-`scripts/probe_phase1_conditioning.py` separates the two in minutes with no training, and
-`tune_gate.py`'s own refusal message says to check the fixture before suspecting the diagnostic.
-**Run the probe on clip50 before treating the margin as broken.**
+*That result was held pending a fixture check, and the check has now run -- see below. The fixture
+was valid, so the margin result stands.*
 
-Finding 1 has no such dependency: the `V_i` fixture contaminates *enrollment*, which never routes
-through `G`.
+Finding 1 never had that dependency: the `V_i` fixture contaminates *enrollment*, which never
+routes through `G`.
+
+#### Q3 follow-up (2026-08-20) -- the conditioning probe: the fixture was VALID
+
+The margin sweep only tests the margin if `G` actually *responds* to its conditioning. If the
+checkpoint did not steer, `G(x_O, e_j)` and `G(x_O, e_i)` would be the same waveform, the fixture
+would have handed the margin two identical populations, and J ~ 0 would be arithmetic rather than a
+finding. `scripts/probe_phase1_conditioning.py` on **clip50, 15 scenes of the same dev-long corpus
+`tune_gate` used** (no pyannote -- the probe uses oracle regions; ~7 min):
+
+| | passthrough vs `x_O` | diagonal | off-diagonal | **steering margin** |
+|---|---|---|---|---|
+| Phase 1 DoD checkpoint (recorded) | 2.89 | **+5.80** | -6.95 | **12.75 dB** |
+| clip50 (this probe) | 2.45 | **+2.36** | -7.05 | **9.41 dB** |
+| Phase 1's collapsed run (recorded) | 35.8 | -- | -- | 0.16 dB |
+
+`VERDICT: conditioning STEERS`. Relative output difference between two speaker embeddings is
+**0.9816** (working reference ~0.86, collapsed ~0.05), and at 2.45 dB against `x_O` the output is
+nothing like a scaled copy of the mixture. **So the swapped population was genuinely different
+audio, and `tau_margin`'s J = +0.046 stands: it is not a detector.**
+
+**One sharp reading of that table: suppression is IDENTICAL (-6.95 vs -7.05); the entire 3.3 dB
+shortfall is in the diagonal.** clip50 learned to reject the wrong speaker but not to reconstruct
+the right one -- exactly the signature of the undertraining Phase 2's close-out documented
+(~13% of Phase 1's per-depth exposure for the 3-speaker case). Note this is a *lower* bound on the
+disparity, since the Phase 1 numbers were measured on a different corpus.
+
+#### The unifying mechanism: everything that EMBEDS `G`'s OUTPUT is gated on `G`'s QUALITY
+
+The probe forces a more precise diagnosis than "the margin is broken", and it explains four
+separate standing puzzles at once.
+
+The probe measures steering in **waveform** space; the margin operates in **embedding** space, on
+`G`'s output. Those can disagree, and here they do: the output is clearly the right speaker
+acoustically (+2.36 vs -7.05 dB), yet TitaNet embeds it to something whose cosine to the right
+enrollment (0.43873) barely beats its cosine to the wrong one (0.41965). At **+2.36 dB the output
+is still mostly distortion**, so its embedding is dominated by artifacts rather than identity and
+lands roughly equidistant from every enrollment. That is precisely the "raw similarity is always
+positive, voices aren't orthogonal" problem §2 introduced the margin to solve -- reappearing
+*inside* the margin, because both of its terms are contaminated the same way.
+
+**The margin formula is not wrong. It is gated on extractor quality** -- exactly like refinement
+is. And once stated, the same root cause covers:
+
+| observation | explanation |
+|---|---|
+| refinement net-harmful in every regime tested | its candidate is embedded from ~2 dB audio |
+| `tau_margin` J = +0.046 | the margin is computed on ~2 dB audio |
+| `gated_deflation` ~ `ungated_deflation` (98-99% accept, Phase 2 and Stage A) | the gate's only live check cannot discriminate |
+| the ceiling accepted 31% where the real gate accepted 70% | the gate is close to noise |
+
+**This makes a testable prediction: all four recover together as `G` improves.** That is a claim
+about the training budget, not about the gate design or the blend rule -- so it argues for spending
+Session C on training rather than on redesigning the acceptance rule, and it means a gate redesign
+evaluated on *this* checkpoint would be measuring the extractor either way.
+
+Two caveats worth keeping attached. `V_i` is **not** in this family -- it embeds enrollment clips
+from the mixture, never `G`'s output, which is why it is the one check that works at this
+checkpoint. And the prediction is currently a mechanism, not a measurement: it is confirmed only by
+re-probing after a better-trained checkpoint exists.
 
 Rejections were `margin` only (67 for `coarse_to_fine`); vad and artifact stayed inert, as in every
 prior run.
 
 #### Next actions, in order
 
-1. **Conditioning probe on clip50** -- minutes, no training. Decides whether Q3's margin half is a
-   finding or a void fixture, and bears on every gated result in Phase 2.
-2. **Add un-stratified whole-output SI-SDR** to the score rows (§7). Without it the dilation
-   operating point cannot be chosen.
+1. ☒ **DONE. Conditioning probe on clip50** -- steers at 9.41 dB, so the margin fixture was valid
+   and J = +0.046 stands. Produced the unifying mechanism above.
+2. ☒ **DONE (2026-08-20). Un-stratified whole-output SI-SDR.** `score_scene` now returns a third
+   list, written to **`{stem}_overall.csv`** -- its own file at its own grain, one row per
+   (scene, speaker, system), NO depth column. The separation is structural on purpose: every
+   per-depth table here groups by `depth`, and a whole-output row carrying one would be absorbed
+   as "another depth" (the `+-inf` drop, the `dilate_ms` sweep and the ceiling's objective are the
+   three times this project has shipped that shape of defect). `run_phase3.py` gains an "Overall
+   SI-SDR" section, which is the ONLY table in the file where dilation sweep points can be
+   compared against each other -- every other one is baseline-only by design.
+   `run_phase2.py` drops the third list, so its committed CSVs stay byte-identical.
+   **It is a reporting number only**: scale-anchored by the bit-exact solo copy, so it rewards
+   fixing a level error over a shape error, and using it as a selection target is precisely what
+   voided the Stage B ceiling.
 3. **Re-run B2** with the corrected ceiling (~1.7 h). The headroom question is currently unknown.
-4. **Re-run the dilation sweep** reading the new overall metric, grid `[0, 100, 200, 400]`.
+   Expect it to stay negative: the unifying mechanism predicts refinement cannot pay while `G`
+   sits at ~2 dB, whatever the acceptance rule. A ceiling that is negative *for a stated reason*
+   is a stronger result than one that is merely negative.
+4. **Re-run the dilation sweep** reading the new overall metric.
+   *Config ready (2026-08-20):* `configs/phase3/experiments/phase3_librimix_3spk_dilation_v2.yaml`,
+   which differs from the run-1 config by `eval.tag` ALONE -- a second file rather than a re-run of
+   the first, because re-running it would overwrite the committed run-1 results, and run 1's
+   dilation table is the phase's headline finding. What changed is the CODE, not the experiment:
+   run 1 predates `_overall.csv`, which is exactly why its operating point could not be chosen.
+   The grid stays `[0, 200, 400, 800]` so every per-depth row is directly comparable and the only
+   new information is the overall column. **Budget: ~6.7 h** (25 x 2 x 4 units at 120 s/unit), so
+   this does NOT fit in a session alongside B2 (~1.7 h) and `vi_on` (~5.0 h) -- give it its own,
+   or drop `limit` to 15 (~4.0 h).
 5. **Set `max_mean_variance: 1e-4`** and re-run a gated comparison -- `V_i` firing for the first
-   time changes what `gated_deflation` means.
+   time changes what `gated_deflation` means. Note this is now the ONLY live check in the gate,
+   since `tau_margin` is confirmed inert, so `gated_deflation` currently differs from
+   `ungated_deflation` by almost nothing.
+   *Config ready (2026-08-20):* `configs/phase3/experiments/phase3_librimix_3spk_vi_on.yaml`,
+   which differs from the Stage A baseline by **exactly one line** so rows pair and the effect is
+   attributable to the threshold alone. The baseline config was deliberately NOT edited -- it
+   generated the committed Stage A CSVs, and retro-editing it would break §7's "one command
+   regenerates this". Expect the gated systems to possibly get *worse*: `V_i` is a partial
+   detector (45.3% detection at 7.9% false rejection), and a false rejection costs quality on
+   every scene while a missed detection costs only on contaminated ones.
+6. ☒ **DONE (2026-08-20). Reconciled the run-1 configs with what actually ran, and taught
+   `aggregate_phase3.py` to read `_overall.csv`.** Two separate things, both §7 hygiene:
+
+   *The reproducibility defect.* The Stage B run-1 results did NOT regenerate from their committed
+   configs. The Kaggle notebook mutated them in-kernel to fit a measured 120 s/unit cost into the
+   session budget, wrote the mutated copies to `/kaggle/working`, and never brought them back:
+
+   | | config said | run actually did |
+   |---|---|---|
+   | dilation grid | `[0,10,25,50,100,200]` | `[0,200,400,800]` |
+   | dilation arms / limit | 3 / 50 | 2 / 25 |
+   | ceiling arms / limit | 3 / 50 | 2 / 25 |
+
+   Both configs now hold exactly what ran, verified programmatically against the committed CSVs.
+   **The lesson is about the harness, not the configs:** a notebook that overrides a config
+   in-kernel breaks §7 silently, because nothing fails and the results look fine. Future runs
+   should write the effective config back beside the results, or vary the config file itself.
+   (The ceiling config carries a note that run 1's numbers are void for an unrelated reason -- the
+   mis-specified objective -- so re-running it now yields the corrected answer from the same
+   config, which is the intended behaviour: the config did not change, the code did.)
+
+   *The aggregation gap.* `aggregate_phase3.py` read only the per-depth CSV, so the new metric
+   never reached a gap table. It now loads the sibling `_overall.csv` automatically (not as a CLI
+   argument -- naming both invites mismatching them) and renders an "overall" section per
+   comparison, paired on `(source, scene, speaker, system, dilate_ms)`. Dilation joins that key for
+   the same reason it joins the per-depth one: pairing `real` at 400 ms against `oracle` at 0 ms
+   would measure the knob and the diarizer together. A missing sibling degrades gracefully, since
+   every CSV written before 2026-08-20 lacks one.
+
+7. **Session C's case is stronger than it was.** The mechanism above says the margin, the gate,
+   refinement and the ceiling are all downstream of `G`'s quality, so they cannot be fixed
+   independently of it -- and a gate redesign evaluated on this checkpoint would be measuring the
+   extractor regardless. Budget arithmetic is in Phase 2's close-out.
 
 ### ☐ Phase 4 — Real corpora + full ablation
 
@@ -2021,16 +2145,21 @@ for the proposed system.
 
 ---
 
-*Last updated: 2026-08-20 — Phase 3 Stage B **Session B** landed (see §5 Phase 3; suite **440
-passed / 1 skipped**). Three results, two of which overturn standing conclusions. (1) **Overlap
-dilation recovers 91% of the oracle-vs-real gap at depth 2** (-2.98 → **-0.28 dB**, 52% win rate
-against oracle diarization) with no retraining — and the oracle arm priced §2's "copy, don't
-separate" at **43.9 dB** for the first time. (2) **`V_i` works**: J = +0.373 at a **1e-4**
-threshold, so the four prior "structurally dead" conclusions were a threshold error — the shipped
-`0.05` sits 500× above the usable range. `tau_margin` scores J = +0.046, but that is **pending a
-conditioning probe** on the clip50 checkpoint, since the fixture is void if `G` does not steer.
-(3) The **refinement ceiling was mis-specified** — it scored the whole waveform while the table
-reported depth 2 — so its number is void and the headroom question is *unknown*; fixed and queued
-for re-run. Stage A's headline is unchanged and now explained. Phase 1 and Phase 2 DoDs remain met;
-Phase 2's gated-vs-ungated results are flagged pending the probe. Per-phase history lives in §5,
-not here — this footer is deliberately kept to a few lines so it cannot drift out of sync with it.*
+*Last updated: 2026-08-20 — Phase 3 Stage B **Session B** landed, plus its follow-up probe (see
+§5 Phase 3; suite **440 passed / 1 skipped**). Four results, two of which overturn standing
+conclusions. (1) **Overlap dilation recovers 91% of the oracle-vs-real gap at depth 2**
+(-2.98 → **-0.28 dB**, 52% win rate against oracle diarization) with no retraining — and the oracle
+arm priced §2's "copy, don't separate" at **43.9 dB** for the first time. (2) **`V_i` works**:
+J = +0.373 at a **1e-4** threshold, so four prior "structurally dead" conclusions were a threshold
+error — the shipped `0.05` sits 500× above the usable range. (3) **`tau_margin` is NOT a detector**
+(J = +0.046), and the conditioning probe confirmed that verdict rather than excusing it: clip50
+steers at 9.41 dB, so the fault fixture was valid. Phase 2's gated-vs-ungated comparison is
+weakened accordingly. (4) The **refinement ceiling was mis-specified** — it scored the whole
+waveform while the table reported depth 2 — so its number is void and the headroom question is
+*unknown*; fixed and queued for re-run. The probe also produced the phase's most useful synthesis:
+**every check that embeds `G`'s output is gated on `G`'s quality**, which explains the dead margin,
+the rubber-stamping gate and net-harmful refinement as one root cause, and predicts they recover
+together only when the extractor does — so Session C's training budget, not a gate redesign, is the
+lever. Stage A's headline is unchanged and now explained. Phase 1 and Phase 2 DoDs remain met.
+Per-phase history lives in §5, not here — this footer is deliberately kept to a few lines so it
+cannot drift out of sync with it.*
