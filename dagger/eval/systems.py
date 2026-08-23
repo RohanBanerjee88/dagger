@@ -32,7 +32,9 @@ from dagger.audio.provenance import original_mixture
 from dagger.diarize.oracle import overlap_depth, overlap_mixture
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.gate.confidence import confidence_gate
-from dagger.metrics.sisdr import si_sdr, si_sdr_by_depth
+from dagger.metrics.sisdr import (
+    depth_scale_factors, si_sdr, si_sdr_by_depth, si_sdr_pooled_by_depth,
+)
 from dagger.reconstruct.deflation import reconstruct_all_deflation
 from dagger.reconstruct.stitch import reconstruct_all
 from dagger.refine.coarse_to_fine import refine_embeddings
@@ -62,13 +64,34 @@ SCORE_FIELDS = [
 # no exchange rate between them. Stage B's dilation sweep is the worked case:
 # +2.19 dB at depth 2 against -29.85 dB at depth 1, with no way to net them.
 #
-# CAUTION, and it is not optional. This number is SCALE-ANCHORED by the
-# bit-exact solo copy that dominates most outputs, so it rewards fixing a level
-# error over fixing a shape error. It is a REPORTING number only -- never a
-# selection, gating or optimization target. Using it as one is exactly what
-# voided Stage B's refinement ceiling (see dagger/refine/oracle_ceiling.py).
+# THREE numbers, because one cannot do the job (measured 2026-08-23):
+#
+#  * `si_sdr`         -- the literal whole-track score. SCALE-ANCHORED by the
+#                        bit-exact solo copy that dominates most outputs, so a
+#                        pure LEVEL error in the overlap region is charged at
+#                        full price while every per-depth row discounts it. On
+#                        the verification run this sat at -13.17 dB against
+#                        constituents of +46.91 and +1.08, BELOW every depth it
+#                        supposedly summarises in 271 of 288 rows, and it
+#                        correlated -0.21 with depth 1. Keep it: it is the only
+#                        number here that can see a level error at all. Do not
+#                        read it as a summary of the per-depth tables.
+#  * `si_sdr_pooled`  -- THE EXCHANGE RATE. Scale fitted per depth, then error
+#                        energies pooled weighted by each depth's true speech
+#                        (`si_sdr_pooled_by_depth`). Provably bounded by the
+#                        best and worst depth, and invariant to a per-region
+#                        gain, so "is dilating net better?" is decidable from
+#                        it. This is the one to compare sweep points on.
+#  * `level_error_db` -- 20*log10(max alpha / min alpha) across depths: how much
+#                        the fitted gain DISAGREES between regions. Every SI-SDR
+#                        here is scale-invariant, so this was invisible until
+#                        the two numbers above disagreed. Now it is measured.
+#
+# All three are REPORTING numbers -- never a selection, gating or optimization
+# target. Optimizing a whole-output number is exactly what voided Stage B's
+# refinement ceiling (see dagger/refine/oracle_ceiling.py).
 OVERALL_FIELDS = [
-    "scene", "speaker", "system", "m", "si_sdr",
+    "scene", "speaker", "system", "m", "si_sdr", "si_sdr_pooled", "level_error_db",
     "deflation_index", "n_accepted_before", "refine_rounds",
 ]
 # Gate decisions live in their own file, at their own grain: one per (scene,
@@ -83,6 +106,23 @@ GATE_FIELDS = [
 
 #: Valid values for ``deflation.order``. See :func:`deflation_order`.
 ORDER_POLICIES = ("variance", "index")
+
+
+def _level_error_db(estimate: np.ndarray, target: np.ndarray, depth: np.ndarray) -> float:
+    """How much the fitted SI-SDR gain disagrees across depth regions, in dB.
+
+    ``0`` means one consistent level explains the whole output; a large value
+    means the extractor's overlap-region output sits at a different level from
+    its (bit-exact) solo copy. Scale-invariant metrics cannot see this, which is
+    why it went unmeasured until the whole-track and per-depth numbers were
+    compared. ``nan`` when fewer than two depths are scoreable, since there is
+    nothing to disagree.
+    """
+    scales = depth_scale_factors(estimate, target, depth)
+    usable = [abs(a) for a in scales.values() if a and np.isfinite(a)]
+    if len(usable) < 2:
+        return float("nan")
+    return float(20.0 * np.log10(max(usable) / min(usable)))
 
 
 def deflation_order(variances: np.ndarray, policy: str = "variance") -> list[int]:
@@ -371,6 +411,12 @@ def score_scene(
                 "system": system_name,
                 "m": num_speakers,
                 "si_sdr": si_sdr(system_outputs[i], target),
+                "si_sdr_pooled": si_sdr_pooled_by_depth(
+                    system_outputs[i], target, scoring_depth
+                ),
+                "level_error_db": _level_error_db(
+                    system_outputs[i], target, scoring_depth
+                ),
                 "deflation_index": deflation_idx[i] if is_deflation else None,
                 "n_accepted_before": n_accepted_before[system_name][i] if is_deflation else None,
                 "refine_rounds": refine_rounds if system_name == "coarse_to_fine" else 0,

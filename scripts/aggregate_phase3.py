@@ -148,29 +148,52 @@ def _load_overall(csv_paths):
                     row["si_sdr"] = float(row["si_sdr"])
                 except (TypeError, ValueError):
                     continue
+                # Added 2026-08-23. Absent in earlier runs, so the key is
+                # DROPPED rather than defaulted -- a default would make a run
+                # that never measured this indistinguishable from one that
+                # measured it as zero.
+                for optional in ("si_sdr_pooled", "level_error_db"):
+                    if optional not in row:
+                        continue
+                    try:
+                        row[optional] = float(row[optional])
+                    except (TypeError, ValueError):
+                        del row[optional]
                 row["dilate_ms"] = float(row.get("dilate_ms") or 0.0)
                 row["source"] = path.name
                 rows.append(row)
     return rows
 
 
-def _overall_table(rows: list[dict], left: str, right: str) -> list[str]:
-    """The un-stratified gap: ``left - right`` on the whole output track.
+def _overall_table(
+    rows: list[dict], left: str, right: str, field: str = "si_sdr_pooled"
+) -> list[str]:
+    """The un-stratified gap: ``left - right``, paired on
+    (source, scene, speaker, system, dilate_ms) -- no depth, because there is
+    no depth. Says whether a configuration is NET better; the per-depth tables
+    say where the difference lives. §6.4 wants both and forbids only reporting
+    this instead of them.
 
-    Paired on (source, scene, speaker, system, dilate_ms) -- no depth, because
-    there is no depth. This is the number that says whether a configuration is
-    NET better; the per-depth tables say where the difference lives. §6.4 wants
-    both, and forbids only reporting this one instead of them.
+    ``field`` defaults to ``si_sdr_pooled`` -- the depth-pooled exchange rate,
+    which fits the scale per depth and is provably bounded by the best and
+    worst of them. The literal whole-track ``si_sdr`` is available too, but it
+    is scale-anchored by the bit-exact solo copy and so is dominated by LEVEL
+    error rather than by the quality tradeoff this table is read for; on
+    2026-08-23 it sat below every depth it appeared to summarise in 271 of 288
+    rows. Runs written before that carry only ``si_sdr``.
     """
     if not rows:
         return ["(no `_overall.csv` beside these score CSVs -- this metric was",
                 "added 2026-08-20, so earlier runs do not have it)", ""]
+    if not any(field in r for r in rows):
+        return [f"(no `{field}` column -- this run predates it; see the "
+                "whole-track table below)", ""]
 
     def key(r):
         return (r["source"], r["scene"], r["speaker"], r["system"], r["dilate_ms"])
 
-    lhs = {key(r): r["si_sdr"] for r in rows if r.get("diarization") == left}
-    rhs = {key(r): r["si_sdr"] for r in rows if r.get("diarization") == right}
+    lhs = {key(r): r[field] for r in rows if r.get("diarization") == left and field in r}
+    rhs = {key(r): r[field] for r in rows if r.get("diarization") == right and field in r}
 
     buckets: dict[str, list[float]] = {}
     for k in lhs:
@@ -248,7 +271,12 @@ def main() -> int:
             "Never read it INSTEAD of them (§6.4), and never optimize against it:",
             "it is scale-anchored by the bit-exact solo copy.", "",
         ]
-        lines += _overall_table(overall_rows, left, right)
+        lines += ["#### pooled across depths (the exchange rate)", ""]
+        lines += _overall_table(overall_rows, left, right, "si_sdr_pooled")
+        lines += ["#### whole output track, one global scale", "",
+                  "Level-sensitive by construction -- read it as a level check,",
+                  "not as a summary of the per-depth tables.", ""]
+        lines += _overall_table(overall_rows, left, right, "si_sdr")
         lines += ["### by overlap depth", ""]
         lines += _table(rows, left, right, "depth")
         lines += [

@@ -8,6 +8,7 @@ estimate gives ``+inf``.
 from __future__ import annotations
 
 import itertools
+import math
 
 import numpy as np
 
@@ -45,6 +46,138 @@ def si_sdr(estimate: np.ndarray, target: np.ndarray) -> float:
     if noise_energy < _EPS:
         return float("inf")
     return 10.0 * np.log10(float(np.dot(projection, projection)) / noise_energy)
+
+
+def _region_energies(
+    estimate: np.ndarray, target: np.ndarray
+) -> tuple[float, float, float]:
+    """``(scale, projection_energy, noise_energy)`` for one region.
+
+    The three quantities :func:`si_sdr` computes before taking the ratio, kept
+    separately so several regions can be pooled by *energy* (which is additive)
+    rather than by dB (which is not).
+    """
+    estimate = np.asarray(estimate, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+
+    target_energy = float(np.dot(target, target))
+    if target_energy < _EPS:
+        return float("nan"), 0.0, 0.0
+
+    scale = float(np.dot(estimate, target)) / (target_energy + _EPS)
+    projection = scale * target
+    noise = estimate - projection
+    return scale, float(np.dot(projection, projection)), float(np.dot(noise, noise))
+
+
+def si_sdr_pooled_by_depth(
+    estimate: np.ndarray,
+    target: np.ndarray,
+    depth: np.ndarray,
+    min_depth: int = 1,
+) -> float:
+    """One number for the whole output that the per-depth tables can license.
+
+    Fits the SI-SDR scale **per depth** — exactly as :func:`si_sdr_by_depth`
+    already does — then pools the resulting error *energies* across depths,
+    weighting each region by how much true speech it holds::
+
+        10 * log10( sum_k T_k / sum_k (T_k / r_k) )
+
+    where ``T_k`` is the target's energy at depth ``k`` and ``r_k`` is that
+    depth's SI-SDR as a power ratio.
+
+    Why not simply ``si_sdr(estimate, target)`` over the whole track: SI-SDR
+    fits ONE scalar over whatever samples it is handed, and which samples you
+    include decides what that scalar becomes (CLAUDE.md §7). When most of the
+    track is a bit-exact solo copy, that scalar is pinned near 1 and a pure
+    *level* error in the overlap region is charged at full price — while every
+    per-depth row, fitting its own scalar, discounts the same error entirely.
+    The two then disagree without either being wrong, and the whole-track number
+    can land below every depth it supposedly summarises (measured on real data
+    2026-08-23: -13.17 dB against constituents of +46.91 and +1.08).
+
+    This function cannot do that. ``sum P / sum N`` is a weighted mediant of the
+    per-depth ratios, so it is bounded by the smallest and largest of them, and
+    it is invariant to a per-region gain. That is what makes it usable as an
+    exchange rate — "does this configuration trade depth 1 for depth 2 at a
+    profit?" — which is the question the un-stratified number was added to
+    answer and cannot.
+
+    It does NOT replace stratification (CLAUDE.md §6.4): report it beside the
+    per-depth tables, never instead of them. Depth 0 (nobody active) is excluded
+    for the same reason :func:`si_sdr_by_depth` excludes it — nothing was
+    claimed there, so there is nothing to score.
+
+    Returns ``nan`` when no depth ``>= min_depth`` carries target energy, and
+    ``+inf`` when every scoreable region is perfect.
+    """
+    estimate = np.asarray(estimate, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    depth = np.asarray(depth)
+
+    # Weights come from the TARGET's energy per region, never the estimate's.
+    # Weighting by the estimate (or by its projection) would let a region the
+    # extractor happens to output loudly pull the pooled number toward its own
+    # score -- reintroducing exactly the level sensitivity this function exists
+    # to remove, one level up. The target is ground truth: how much real speech
+    # sits at each depth is a property of the scene, not of the system.
+    total_target = 0.0
+    total_noise = 0.0
+    scored = False
+    for k in np.unique(depth):
+        if k < min_depth:
+            continue
+        mask = depth == k
+        target_energy = float(np.dot(target[mask], target[mask]))
+        if target_energy < _EPS:
+            continue  # silent target in this bucket: undefined, not zero-error
+        ratio = 10.0 ** (si_sdr_regionwise(estimate, target, mask) / 10.0)
+        scored = True
+        total_target += target_energy
+        total_noise += target_energy / ratio if ratio > 0.0 else float("inf")
+
+    if not scored:
+        return float("nan")
+    if math.isinf(total_noise):
+        return float("-inf")  # a region output silence against real speech
+    if total_noise < _EPS:
+        return float("inf")
+    return 10.0 * np.log10(total_target / total_noise)
+
+
+def depth_scale_factors(
+    estimate: np.ndarray,
+    target: np.ndarray,
+    depth: np.ndarray,
+    min_depth: int = 1,
+) -> dict[int, float]:
+    """The optimal SI-SDR scale ``alpha_k`` fitted in each depth region.
+
+    Every SI-SDR in this project is scale-invariant, so a systematic level error
+    in one region is invisible to all of them — it shows up only as a
+    disagreement between the whole-track number and the per-depth ones, which is
+    how it stayed unmeasured until 2026-08-23. Reporting the scales directly
+    turns that inference into a measurement: ``max(alpha) / min(alpha)`` is the
+    level disagreement across regions, and a globally rescaled estimate leaves
+    that ratio unchanged (only cross-region disagreement moves it).
+
+    Buckets whose target is silent are omitted, matching
+    :func:`si_sdr_by_depth`.
+    """
+    estimate = np.asarray(estimate, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    depth = np.asarray(depth)
+
+    scales: dict[int, float] = {}
+    for k in np.unique(depth):
+        if k < min_depth:
+            continue
+        mask = depth == k
+        scale, _, _ = _region_energies(estimate[mask], target[mask])
+        if not math.isnan(scale):
+            scales[int(k)] = scale
+    return scales
 
 
 def si_sdr_regionwise(

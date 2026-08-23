@@ -14,8 +14,19 @@ The tests below pin the two things that make it safe rather than dangerous:
    shipped three times here (the ``+-inf`` drop, the ``dilate_ms`` sweep, the
    ceiling's objective), so the separation is enforced structurally.
 
-2. **It genuinely pools the depths**, rather than duplicating one of them --
-   otherwise it would answer nothing the per-depth rows do not already answer.
+2. **It genuinely reflects more than one depth**, rather than duplicating one
+   of them -- otherwise it would answer nothing the per-depth rows do not
+   already answer.
+
+CORRECTION (2026-08-23): this file used to claim the whole-track number "pools
+the depths". It does not, and reading it that way is what let a defect ship. It
+fits ONE scale over the whole track, so the bit-exact solo copy pins that scale
+near 1 and a pure LEVEL error in the overlap region is charged at full price --
+while every per-depth row fits its own scale and discounts the same error. On
+the verification run the whole-track number therefore landed BELOW every depth
+it appeared to summarise in 271 of 288 rows. The pooled exchange rate that
+genuinely is bounded by its constituents is ``si_sdr_pooled``; see
+``tests/phase3/test_pooled_depth_metric.py``.
 """
 
 from __future__ import annotations
@@ -225,22 +236,30 @@ def _load_aggregate():
 aggregate_phase3 = _load_aggregate()
 
 
-def _overall_csv(path: Path, records):
+def _overall_csv(path: Path, records, legacy: bool = False):
+    """``legacy=True`` writes the pre-2026-08-23 schema (no pooled column), so
+    the back-compat path is exercised by the same helper rather than by a
+    hand-rolled second one that could drift from it."""
     fields = ["diarization", "dilate_ms", "scene", "speaker", "system", "m",
               "si_sdr", "deflation_index", "n_accepted_before", "refine_rounds",
               "cluster", "n_clusters"]
+    if not legacy:
+        fields[7:7] = ["si_sdr_pooled", "level_error_db"]
     import csv as _csv
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = _csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         for r in records:
-            w.writerow({**{f: "" for f in fields}, **r})
+            row = {**{f: "" for f in fields}, **r}
+            w.writerow({f: row[f] for f in fields})
 
 
 def _rec(arm, scene, speaker, si_sdr, dilate_ms=0.0, system="no_recursion"):
+    # The pooled value is what the gap table reads by default; give it the same
+    # number so these pairing tests stay about pairing.
     return {"diarization": arm, "dilate_ms": dilate_ms, "scene": scene,
             "speaker": speaker, "system": system, "m": 3, "si_sdr": si_sdr,
-            "refine_rounds": 0}
+            "si_sdr_pooled": si_sdr, "level_error_db": 0.0, "refine_rounds": 0}
 
 
 class TestAggregationReadsTheSiblingFile:
@@ -303,3 +322,95 @@ class TestAggregationReadsTheSiblingFile:
         section = source[i:i + 600]
         assert "INSTEAD of them" in section
         assert "never optimize against it" in section
+
+
+class TestLegacyRunsWithoutTheNewColumns:
+    """Every CSV written before 2026-08-23 has `si_sdr` and nothing else. Those
+    must still aggregate -- and must say so, rather than rendering an empty
+    table that reads as "the metric found nothing"."""
+
+    def test_the_pooled_gap_table_says_the_run_predates_it(self, tmp_path):
+        csv_path = tmp_path / "run.csv"
+        csv_path.write_text("placeholder\n")
+        _overall_csv(tmp_path / "run_overall.csv", [
+            _rec("oracle", "s1", "a", 5.0), _rec("real", "s1", "a", 2.0),
+        ], legacy=True)
+        rows = aggregate_phase3._load_overall([csv_path])
+        assert rows and "si_sdr_pooled" not in rows[0], (
+            "the key must be DROPPED, not defaulted -- a default makes 'never "
+            "measured' look like 'measured as zero'"
+        )
+        rendered = "\n".join(
+            aggregate_phase3._overall_table(rows, "real", "oracle", "si_sdr_pooled")
+        )
+        assert "predates it" in rendered, rendered
+
+    def test_the_whole_track_gap_table_still_pairs(self, tmp_path):
+        csv_path = tmp_path / "run.csv"
+        csv_path.write_text("placeholder\n")
+        _overall_csv(tmp_path / "run_overall.csv", [
+            _rec("oracle", "s1", "a", 5.0), _rec("real", "s1", "a", 2.0),
+        ], legacy=True)
+        rows = aggregate_phase3._load_overall([csv_path])
+        rendered = "\n".join(
+            aggregate_phase3._overall_table(rows, "real", "oracle", "si_sdr")
+        )
+        assert "| no_recursion | 1 | -3.00 |" in rendered, rendered
+
+    def test_the_md_section_names_the_missing_column(self, tmp_path):
+        legacy_row = {
+            "diarization": "oracle", "dilate_ms": 0.0, "scene": "s",
+            "speaker": "s1", "system": "no_recursion", "m": 3, "si_sdr": 1.0,
+            "deflation_index": None, "n_accepted_before": None,
+            "refine_rounds": 0, "cluster": "s1", "n_clusters": 3,
+        }
+        run_phase3._write_results(
+            [], [], [], [legacy_row], tmp_path, "stem", ["oracle"], n_scenes=1,
+        )
+        text = (tmp_path / "stem.md").read_text()
+        assert "no `si_sdr_pooled` in this run" in text
+
+
+class TestTheLevelColumnIsNotClipped:
+    """`clip_score` caps at ±50 dB to tame `±inf` SI-SDR. A level DISAGREEMENT
+    is not an SI-SDR and has no such pathology, so capping it would report a
+    60 dB level error as 50 -- a silently truncated diagnostic, in the column
+    that exists precisely to stop level error hiding."""
+
+    def _md(self, tmp_path, level_error_db):
+        run_phase3._write_results(
+            [], [], [], [{
+                "diarization": "oracle", "dilate_ms": 0.0, "scene": "s",
+                "speaker": "s1", "system": "no_recursion", "m": 3, "si_sdr": 1.0,
+                "si_sdr_pooled": 1.0, "level_error_db": level_error_db,
+                "deflation_index": None, "n_accepted_before": None,
+                "refine_rounds": 0, "cluster": "s1", "n_clusters": 3,
+            }], tmp_path, "stem", ["oracle"], n_scenes=1,
+        )
+        return (tmp_path / "stem.md").read_text()
+
+    def test_a_large_level_error_is_reported_in_full(self, tmp_path):
+        text = self._md(tmp_path, 60.0)
+        assert "60.00" in text, "level error was clipped to the SI-SDR cap"
+
+    def test_si_sdr_itself_is_still_clipped(self, tmp_path):
+        """The complement, so the test above cannot pass by disabling clipping
+        everywhere -- ±inf must still be tamed in the SI-SDR tables."""
+        run_phase3._write_results(
+            [], [], [], [{
+                "diarization": "oracle", "dilate_ms": 0.0, "scene": "s",
+                "speaker": "s1", "system": "no_recursion", "m": 3,
+                "si_sdr": float("inf"), "si_sdr_pooled": float("inf"),
+                "level_error_db": 0.0, "deflation_index": None,
+                "n_accepted_before": None, "refine_rounds": 0,
+                "cluster": "s1", "n_clusters": 3,
+            }], tmp_path, "stem", ["oracle"], n_scenes=1,
+        )
+        assert "50.00" in (tmp_path / "stem.md").read_text()
+
+    def test_an_unmeasurable_level_error_is_dropped_not_zeroed(self, tmp_path):
+        """`nan` means fewer than two depths were scoreable, i.e. nothing could
+        disagree. Rendering that as 0.00 would claim a measurement was made."""
+        text = self._md(tmp_path, float("nan"))
+        i = text.index("### Level disagreement")
+        assert "0.00" not in text[i:i + 400], text[i:i + 400]

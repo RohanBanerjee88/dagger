@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 from pathlib import Path
 
@@ -600,34 +601,83 @@ def _overall_section(overall_rows: list[dict], arms: list[str]) -> list[str]:
     """
     if not overall_rows:
         return []
-    lines = [
-        "", "## Overall SI-SDR (un-stratified, whole output track)", "",
-        "One row per (scene, speaker, system); no depth stratification. Read it",
-        "WITH the per-depth tables, never instead of them -- and never optimize",
-        "against it: it is anchored by the bit-exact solo copy, so it rewards",
-        "fixing a level error over fixing a shape error.", "",
-    ]
+
     dilations = sorted({r["dilate_ms"] for r in overall_rows})
-    header = "| arm | system |" + "".join(f" {d:g} ms |" for d in dilations)
-    lines += [header, "|---" * (2 + len(dilations)) + "|"]
-    for arm in arms:
-        for system_name in SYSTEMS:
-            cells = []
-            for d in dilations:
-                vals = [
-                    clip_score(r["si_sdr"]) for r in overall_rows
-                    if r["diarization"] == arm and r["system"] == system_name
-                    and r["dilate_ms"] == d
-                ]
-                vals = [v for v in vals if v is not None]
-                if not vals:
-                    cells.append("n/a")
+
+    def value_of(row: dict, field: str) -> float | None:
+        """``clip_score``'s ±50 dB cap exists to tame ``±inf`` SI-SDR. A level
+        DISAGREEMENT is not an SI-SDR and has no such pathology, so capping it
+        would quietly report a 60 dB level error as 50 -- a truncated
+        diagnostic, which is the exact defect class this column was added to
+        expose. Drop nan/inf there instead of clipping."""
+        raw = row[field]
+        if field == "level_error_db":
+            v = float(raw)
+            return None if not math.isfinite(v) else v
+        return clip_score(raw)
+
+    def table(field: str) -> list[str]:
+        # Rows written before 2026-08-23 carry only `si_sdr`. Rendering an empty
+        # table for a column that did not exist yet would read as "the metric
+        # says nothing here" rather than "this run predates the metric".
+        if not any(field in r for r in overall_rows):
+            return [f"_(no `{field}` in this run -- it predates the column.)_"]
+        header = "| arm | system |" + "".join(f" {d:g} ms |" for d in dilations)
+        out = [header, "|---" * (2 + len(dilations)) + "|"]
+        for arm in arms:
+            for system_name in SYSTEMS:
+                cells = []
+                for d in dilations:
+                    vals = [
+                        value_of(r, field) for r in overall_rows
+                        if r["diarization"] == arm and r["system"] == system_name
+                        and r["dilate_ms"] == d and field in r
+                    ]
+                    vals = [v for v in vals if v is not None]
+                    if not vals:
+                        cells.append("n/a")
+                        continue
+                    mean, sem, _n = mean_sem(vals)
+                    cells.append(f"{mean:.2f}±{sem:.2f}")
+                if all(c == "n/a" for c in cells):
                     continue
-                mean, sem, n = mean_sem(vals)
-                cells.append(f"{mean:.2f}±{sem:.2f}")
-            if all(c == "n/a" for c in cells):
-                continue
-            lines.append(f"| {arm} | {system_name} |" + "".join(f" {c} |" for c in cells))
+                out.append(
+                    f"| {arm} | {system_name} |" + "".join(f" {c} |" for c in cells)
+                )
+        return out
+
+    lines = [
+        "", "## Overall SI-SDR (un-stratified)", "",
+        "One row per (scene, speaker, system); no depth stratification. Read",
+        "these WITH the per-depth tables, never instead of them (§6.4), and",
+        "never optimize against any of them -- optimizing a whole-output number",
+        "is what voided Stage B's refinement ceiling.", "",
+        "### Pooled across depths -- THE EXCHANGE RATE", "",
+        "Scale fitted per depth (so a per-region level error is discounted",
+        "exactly as the per-depth tables discount it), then error energies",
+        "pooled weighted by each depth's true speech. Provably bounded by the",
+        "best and worst depth, so it can weigh a depth-1 loss against a depth-2",
+        "gain. **This is the number to compare sweep points on.**", "",
+    ]
+    lines += table("si_sdr_pooled")
+    lines += [
+        "", "### Whole output track, one global scale", "",
+        "The literal `si_sdr(output, target)`. SCALE-ANCHORED by the bit-exact",
+        "solo copy, so a pure LEVEL error in the overlap region is charged at",
+        "full price while every per-depth row discounts it -- which is why this",
+        "can land BELOW every depth it appears to summarise (it did so in 271 of",
+        "288 rows on 2026-08-23). Kept because it is the only score here that",
+        "can see a level error at all; not a summary of the tables above.", "",
+    ]
+    lines += table("si_sdr")
+    lines += [
+        "", "### Level disagreement across depths (dB)", "",
+        "`20*log10(max alpha / min alpha)` over the per-depth fitted scales. 0",
+        "means one consistent level explains the whole output. Large values are",
+        "the mechanism behind any gap between the two tables above, and are",
+        "invisible to every scale-invariant metric in this project.", "",
+    ]
+    lines += table("level_error_db")
     return lines + [""]
 
 

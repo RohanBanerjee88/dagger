@@ -2050,6 +2050,183 @@ prior run.
    independently of it -- and a gate redesign evaluated on this checkpoint would be measuring the
    extractor regardless. Budget arithmetic is in Phase 2's close-out.
 
+---
+
+**STAGE B -- VERIFICATION PASS (2026-08-23): all five checks ran; four pass, and the fifth passed
+only vacuously and was hiding a real defect. Test E's byte-identity failure is CLOSED as benign
+(line endings, exact arithmetic below). The un-stratified metric added in `9f62f4b` is
+LEVEL-DOMINATED and could not have chosen the dilation operating point -- diagnosed, fixed, and the
+fix is the first thing in this project that can see an extractor level error at all.**
+
+Artifacts: `results/phase3/experiments/verify_4_questions_run/` (12 files) and the executed
+notebook `dagger.ipynb` at the repo root, outputs embedded. ~90 min of Kaggle GPU, all inference,
+no training. Offline suite inside the same session: 453 passed.
+
+#### The scorecard
+
+| test | verdict | evidence |
+|---|---|---|
+| A -- reconciled config reproduces run 1 | **PASS** | 576 shared rows, 0 mismatched, exact string equality (46.6 min) |
+| B -- `_overall.csv` grain + pooling | **VACUOUS PASS** | `checked = 0`; see below |
+| C -- `aggregate_phase3` reads the sibling | **PASS** | loads when present, degrades when absent |
+| D -- does `V_i` fire at 1e-4? | **PASS, read the rate** | 6 rejections / 81 decisions, max 0.000144 (17.7 min) |
+| E -- Phase 2 byte-identity | **PASS (soft)** | 0/5400 si_sdr differ, `max abs delta = 0.000e+00` (25.4 min) |
+
+Test A also settles the A5 guard question for the 3-tuple refactor: the per-depth rows are
+untouched, verified against the committed corpus rather than synthetically.
+
+#### Test E: benign, and the arithmetic is exact
+
+Committed `8745fbfb...` vs fresh `84d69f89...`, 489764 vs 495166 bytes. The committed file has
+**0 CR**, 5400 LF, and **no trailing newline**; the fresh one is 5401 CRLF-terminated lines. That
+is 5401 extra CR + 1 extra LF = **5402**, which is the observed delta exactly. Values are
+bit-identical on all 5400 rows.
+
+*The guard needs narrowing, not abandoning.* A byte-level comparison across environments tests the
+csv dialect, the float repr and the CUDA stack as much as it tests the code. Replace it with
+**every shared key present and `max |delta si_sdr| < 1e-3 dB`**, which still catches a logic change
+while surviving a driver upgrade or a line-ending difference. (Not yet applied.)
+
+#### Test B passed while verifying NOTHING, and that is the story of this session
+
+The pooling check skips any speaker lacking a `+inf` depth row:
+
+```python
+if not (finite and any(d == math.inf for d in depths)):
+    continue
+```
+
+These 2-minute chain scenes have **zero** `+inf` rows -- the whole 25-scene sweep has only 40, and
+none in the 3 smoke scenes -- because crossfade ramps sit inside the depth-1 region, so a solo copy
+scores 38-88 dB rather than exactly perfect. The guard therefore `continue`d all 288 rows and
+printed `PASS -- 0 speakers verified`. The repo's own copy of this test
+(`tests/phase3/test_overall_metric.py`) has `assert checked > 0` and was never at risk; the
+notebook's copy dropped it.
+
+**Had it run it would have failed.** 271 of 288 overall rows sit BELOW the worst per-depth value for
+the same speaker, by 5-20 dB.
+
+#### The `_overall.csv` defect: not a wiring bug, a metric that measures the wrong thing
+
+Three findings, each ruling out a candidate rather than assuming:
+
+1. **It is nearly blind to depth 1.** Dilation collapses the solo block by 42-81 dB per speaker;
+   the overall number moves by -2.30 to +1.93 dB, in *both* directions. Across all 288 rows,
+   `corr(overall, depth1) = -0.206` and `corr(overall, depth2) = +0.532`.
+2. **Not the documented scale-anchoring caveat, at this magnitude.** Simulated: at this corpus's
+   geometry (solo ~75% of each speaker's speech) the whole-track number bottoms out near **-4.5 dB**
+   even with the overlap output 100x too loud. Measured mean is **-13.71**, min **-45.37**.
+3. **Not VAD truncation.** The first hypothesis was that `active_mask`'s -40 dB threshold drops soft
+   onsets, leaving target energy at `depth == 0` where the reconstruction emits exactly 0. Dead:
+   `dagger/data/librimix.py:174,180` uses `segments_from_chunks`/`segments_from_placement`, so
+   activity is the exact placement window and depth 0 holds no energy on either side. Confirmed
+   directly -- a local chain-placed repro has **0 samples at depth 0**.
+
+*Root cause, reproduced locally and proven with a one-variable sweep.* SI-SDR fits ONE scalar over
+whatever samples it is handed. Score the whole track and the near-exact solo copy pins that scalar
+near 1, so a pure **level** error in the overlap region is charged at full price; score each depth
+separately and the scalar floats per region and absorbs the same error for free. Holding the
+estimate's SHAPE fixed and moving only its overlap gain:
+
+| overlap gain | depth 1 | depth 2 | whole track |
+|---|---|---|---|
+| 1x | 39.15 | -0.00 | **+5.23** |
+| 3x | 39.15 | -0.00 | -1.41 |
+| 10x | 39.15 | -0.00 | -5.36 |
+| 1000x | 39.15 | -0.00 | **-7.51** |
+
+Every per-depth score is bit-identical down the column while the whole-track number falls 13 dB.
+**So the whole-track metric is dominated by an extractor LEVEL error, not by the quality tradeoff
+it was added to weigh** -- and it therefore could not have chosen the dilation operating point,
+which was its entire purpose. Note it would still have picked 800 ms, matching the per-depth story:
+a broken metric returning the plausible answer, which is how this defect class keeps surviving real
+runs here.
+
+*This also means an extractor level error has been present and unmeasurable all along.* Every
+SI-SDR in this project is scale-invariant, so nothing could see it. It shows up only as a
+disagreement between two metrics, which is how it stayed hidden until these two existed side by
+side.
+
+#### The fix (landed, suite 471 passed / 1 skipped, up from 453)
+
+`dagger/metrics/sisdr.py` gains two functions, and the overall row gains two columns beside the
+existing `si_sdr` (which is KEPT -- it is the only score here that can see a level error):
+
+* **`si_sdr_pooled_by_depth` -> `si_sdr_pooled`. THE EXCHANGE RATE.** Fits the scale per depth,
+  then pools error energies weighted by each depth's *true speech*:
+  `10*log10( sum_k T_k / sum_k (T_k/r_k) )`. Being a weighted mediant of the per-depth ratios it is
+  **provably bounded** by the best and worst of them, and invariant to a per-region gain. This is
+  the number to compare sweep points on.
+  *Weights come from the TARGET, never the estimate.* The first implementation pooled projection
+  energies and a test caught it immediately: that lets a region the extractor happens to output
+  loudly pull the pooled number toward its own score, reintroducing the exact level sensitivity the
+  function exists to remove, one level up.
+* **`depth_scale_factors` -> `level_error_db`.** `20*log10(max alpha / min alpha)` across depths.
+  Verified to recover a known gain exactly (9.54 / 20.00 / 40.00 / 60.00 dB for 3x/10x/100x/1000x)
+  while `si_sdr_pooled` stays bit-stable. This column is deliberately **not** put through
+  `clip_score`: its +-50 dB cap exists to tame `+-inf` SI-SDR, and truncating a 60 dB level error to
+  50 would be a silently wrong diagnostic in the one column added to stop level error hiding.
+
+`SCORE_FIELDS` and `GATE_FIELDS` are **untouched** and `run_phase2.py` is unmodified, so Phase 2
+CSVs stay byte-identical. Old CSVs (every run before 2026-08-23) lack the new columns; the loader
+**drops** the key rather than defaulting it -- a default would make "never measured" look like
+"measured as zero" -- and both the `.md` section and the gap table say the run predates the column
+instead of rendering an empty table. Pinned by `tests/phase3/test_pooled_depth_metric.py` (13 tests,
+including a characterization of the level-dominated behaviour so it can never again be mistaken for
+a bug) plus back-compat and no-clip tests in `test_overall_metric.py`.
+
+The false claim that started it is corrected at source: `test_overall_metric.py`'s docstring used to
+say the whole-track number "genuinely pools the depths". It does not, and reading it that way is
+what let this ship.
+
+#### Test D: `V_i` fires, and the rate is the point
+
+6 of 81 decisions = **7.4%**, on ordinary honest enrollment, max `0.000144` against the `1e-4`
+threshold. The dev sweep's predicted **false-rejection** rate was 7.9%. Those match, so on this
+evidence the firings may be *entirely* false rejections. `vi_on` is unblocked by the notebook's own
+criterion (nonzero), but expect it to measure a cost rather than a win -- consistent with what
+Session B already predicted for a partial detector (45.3% detection at 7.9% false rejection).
+
+#### Where the four Stage A items stand after this session
+
+| # | item | status |
+|---|---|---|
+| 1 | gate has never been tuned | **Answered** (Session B). `vi_on` (~5.0 h) bookable; expect a cost. |
+| 2 | absolute quality | **Untouched.** Session C. Critical path. |
+| 3 | activity masks / dilation | **Mechanism answered** (91% recovery). Operating point was blocked on a defective metric; the metric is now fixed but **the sweep must be re-run to read it**. |
+| 4 | refinement ceiling | **Unknown.** Re-run queued, ~1.7 h, unaffected by any of this. |
+
+#### Next actions, in order
+
+1. **Narrow the A5 guard** to parsed-value tolerance. The diagnosis is in; the condition the
+   previous note attached to this ("apply only once the diagnostic says which case") is satisfied.
+2. **B2 ceiling re-run (~1.7 h).** Cheapest, answers the only genuinely open question of the four,
+   and depends on none of the above.
+3. **`dilation_v2` (~6.7 h at limit 25) now has a metric that can decide it.** Read
+   `si_sdr_pooled`, not `si_sdr`. Watch `level_error_db` in the same table: if it is large, the
+   extractor has a level problem worth fixing before any of this is tuned further.
+4. **`vi_on` (~5.0 h at limit 50).**
+5. **Fix the notebook's Test B guard** if it is reused: drop the `+inf` precondition (require two
+   finite depths instead) and print `checked` before the verdict. The general property to assert is
+   the bound on `si_sdr_pooled`; the whole-track number has no such bound and must not be tested as
+   though it does.
+
+#### Still open, unchanged by this session
+
+* **Session C's training run**, blocked on two decisions: (a) do training masks come from oracle +
+  `mask_augment`, or from real pyannote output cached once in a CPU session? (b) warm-start from
+  clip50, or scratch? `mask_augment.py` is written and unit-tested but has never touched a training
+  run, and its motivation is partly undercut by dilation -- augmentation makes `G` robust to bad
+  masks, while dilation makes the masks good.
+* **A `CONTEXT.md` glossary** was requested and still does not exist. ADR candidates: §1's
+  no-residual rule, eval-encoder-not-training-encoder, the mask-source question, and now
+  **which-slice-a-metric-scores**, which has caused three defects (the ceiling's objective, this
+  one, and Test B's guard).
+* **The Session C memory constraint:** `build_scene_crop_dataset._prepare` keeps each whole scene
+  resident at ~35 bytes/sample, so a 2-minute scene is ~34 MB. 800 scenes is 27 GB (Kaggle's
+  ceiling) and Phase 2's 2400-scene curriculum count would need **81 GB**. The model only ever sees
+  4 s crops, so long scenes buy realistic enrollment and overlap density, not longer inputs.
+
 ### ☐ Phase 4 — Real corpora + full ablation
 
 **Goal:** the results section.
@@ -2120,12 +2297,30 @@ for the proposed system.
     directions on Stage B's test fixture. **Any rule that selects, gates, or optimizes must score
     the same slice the claim is reported on.** Getting this wrong voided Stage B's refinement
     ceiling; `dagger/refine/oracle_ceiling.py` documents the failure.
-  - **The un-stratified, whole-output number is MISSING and should be added.** Every metric here is
-    per-depth, which §6.4 rightly requires — but stratify-only leaves questions like "is dilating
-    net better?" unanswerable, since the gain and the cost land in different rows with no exchange
-    rate between them. §6.4 forbids reporting an aggregate *instead of* stratification, not
-    alongside it. Add `si_sdr(output, target)` over the whole waveform as one extra row per
-    (scene, speaker) and report both.
+  - **The un-stratified number exists now, and there are TWO of them — use the right one.**
+    Stratify-only leaves "is dilating net better?" unanswerable, since the gain and the cost land
+    in different rows with no exchange rate between them; §6.4 forbids an aggregate *instead of*
+    stratification, not alongside it. But the obvious implementation is a trap, and we fell in it
+    (2026-08-23):
+    - **`si_sdr_pooled`** is the **exchange rate**. It fits the scale *per depth*, then pools error
+      energies weighted by each depth's true speech. It is provably bounded by the best and worst
+      depth and invariant to a per-region gain. **Compare configurations on this.**
+    - **`si_sdr`** over the whole track fits ONE scale, which the near-exact solo copy pins near 1 —
+      so a pure *level* error in the overlap region is charged at full price while every per-depth
+      row discounts it. It landed **below every depth it appeared to summarise in 271 of 288 rows**
+      and correlated **−0.21** with depth 1. Keep it: it is the only score here that can see a level
+      error at all. Never read it as a summary of the per-depth tables.
+    - **`level_error_db`** is that level disagreement, made explicit. Every SI-SDR in this project
+      is scale-invariant, so a systematic level error is invisible to all of them and shows up only
+      as a discrepancy between the two numbers above.
+  - **Weight a pooled metric by the TARGET, never by the estimate.** Weighting by the estimate's
+    energy lets a region the system happens to output loudly pull the pooled score toward its own
+    value — reintroducing level sensitivity one level up. The target is ground truth; how much real
+    speech sits at each depth is a property of the scene, not of the system.
+  - **A guard that verifies zero rows is not a passing guard.** Test B (2026-08-23) required a
+    `+inf` depth row that this corpus never produces, skipped all 288 rows, and printed PASS while
+    the property it checked was violated in 271 of them. **Always print the count you verified, and
+    assert it is nonzero.**
   - **`|t| ≳ 2`** as a reading heuristic for "unlikely to be chance." Effect size and significance
     are separate questions and both get reported: Phase 2's accumulation decline is solidly
     non-chance (`t = −4.5`) *and* 3× smaller than the prior checkpoint's.
@@ -2161,5 +2356,24 @@ waveform while the table reported depth 2 — so its number is void and the head
 the rubber-stamping gate and net-harmful refinement as one root cause, and predicts they recover
 together only when the extractor does — so Session C's training budget, not a gate redesign, is the
 lever. Stage A's headline is unchanged and now explained. Phase 1 and Phase 2 DoDs remain met.
+
+**2026-08-23 — Stage B VERIFICATION PASS complete** (see "STAGE B — VERIFICATION PASS" in §5;
+suite now **471 passed / 1 skipped**). All five checks ran. **Test E is closed as benign**: values
+bit-identical on all 5400 rows, the byte delta is exactly line endings (5401 CR + 1 LF = 5402), so
+the A5 guard needs narrowing to a value tolerance, not abandoning. **Test B passed vacuously** — its
+guard required a `+inf` depth row this corpus never produces, so it verified 0 of 288 rows — and it
+was hiding a real defect: the un-stratified `si_sdr` added in `9f62f4b` is **level-dominated**, sat
+below every depth it appeared to summarise in **271 of 288 rows**, and correlated **−0.21** with
+depth 1. Root cause is not a wiring bug but the one-scale-per-slice property in §7: reproduced by
+holding an estimate's shape fixed and moving only its overlap gain, which leaves every per-depth
+score bit-identical while the whole-track number falls 13 dB. **Fixed**: `si_sdr_pooled` (the
+bounded, gain-invariant exchange rate — compare configurations on this) and `level_error_db` (the
+extractor level error, which every scale-invariant metric in this project was structurally unable
+to see). Phase 2 CSVs are unaffected — `SCORE_FIELDS`/`GATE_FIELDS` untouched, `run_phase2.py`
+unmodified. **`V_i` fires** at 1e-4 (6/81), but at ~the predicted false-rejection rate, so `vi_on`
+likely measures a cost. Of the four Stage A items: 1 answered, 2 untouched (Session C, critical
+path), 3 mechanism answered but the operating point needs the dilation sweep RE-RUN to read the new
+metric, 4 still unknown (B2, ~1.7 h, cheapest and unblocked).
+
 Per-phase history lives in §5, not here — this footer is deliberately kept to a few lines so it
 cannot drift out of sync with it.*
