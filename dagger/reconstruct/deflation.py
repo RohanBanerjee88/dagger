@@ -25,7 +25,7 @@ import numpy as np
 from dagger.audio.provenance import Provenance, TrackedSignal
 from dagger.extract.base import Extractor
 from dagger.gate.confidence import GateResult
-from dagger.reconstruct.stitch import crossfade_windows
+from dagger.reconstruct.stitch import crossfade_windows, match_level_to_mixture
 
 
 def _extract_from_residual(extractor: Extractor, residual: TrackedSignal, embedding: np.ndarray) -> np.ndarray:
@@ -51,6 +51,7 @@ def reconstruct_all_deflation(
     *,
     gate_fn: Optional[Callable[[int, np.ndarray], GateResult]] = None,
     fade: int = 0,
+    rescale_to_mixture: bool = False,
 ) -> tuple[np.ndarray, list[Optional[GateResult]], np.ndarray]:
     """Iterative residual-deflation reconstruction, for comparison only.
 
@@ -87,8 +88,26 @@ def reconstruct_all_deflation(
     running_residual = x_O
     for i in order:
         w_Ei, w_Oi = crossfade_windows(solo[i], activity[i], fade=fade)
-        g_out = _extract_from_residual(extractor, running_residual, embeddings[i])
-        outputs[i] = x_samples * w_Ei + np.asarray(g_out, dtype=np.float64) * w_Oi
+        g_out = np.asarray(
+            _extract_from_residual(extractor, running_residual, embeddings[i]),
+            dtype=np.float64,
+        )
+        if rescale_to_mixture:
+            # Against the RUNNING RESIDUAL, not the original `x_O`: the residual
+            # is what this speaker was extracted from, so it is the mixture whose
+            # level this estimate should match. Using `x_O` here would ask a
+            # later speaker's estimate to match a mixture that still contains
+            # every already-subtracted speaker.
+            #
+            # This matters more here than in the accumulation-free path. Deflation
+            # SUBTRACTS each estimate into the residual, so an estimate emitted
+            # 2.86x too loud over-subtracts and the error compounds down the
+            # chain -- which is why the deflation systems measured a higher
+            # level error than `no_recursion` (11.48 vs 8.88 dB, 2026-08-23).
+            g_out = match_level_to_mixture(
+                g_out, np.asarray(running_residual, dtype=np.float64), w_Oi
+            )
+        outputs[i] = x_samples * w_Ei + g_out * w_Oi
 
         accept = True
         if gate_fn is not None:

@@ -2227,6 +2227,141 @@ Session B already predicted for a partial detector (45.3% detection at 7.9% fals
   ceiling) and Phase 2's 2400-scene curriculum count would need **81 GB**. The model only ever sees
   4 s crops, so long scenes buy realistic enrollment and overlap density, not longer inputs.
 
+
+---
+
+**LEVEL-CHECK RUN (2026-08-23, same day, later): `G` EMITS THE OVERLAP REGION 2.86x TOO LOUD. A
+systematic gain error that has been present and structurally unmeasurable for three phases, found
+the moment two metrics with different scale behaviour sat side by side. `si_sdr_pooled` is
+validated against a known result in the same run. Nothing committed moved.**
+
+`levelcheck.ipynb` (repo root, outputs embedded), 3 scenes x 2 arms x 0 ms only = 6 units, ~25 min
+including setup. Artifacts under `results/verify/` in the session; suite 475 passed inside it.
+
+#### The three results
+
+**1. `level_error_db` = +9.14 dB median (2.86x amplitude), and it is worse for deflation.**
+
+| arm | system | level error (median) | pooled |
+|---|---|---|---|
+| oracle | `no_recursion` | 8.88 | 5.25 |
+| oracle | `coarse_to_fine` | 7.98 | 4.21 |
+| oracle | `gated_deflation` | **11.48** | 3.44 |
+| oracle | `ungated_deflation` | **11.48** | 3.44 |
+
+Range 4.58 to 20.68 dB. `gated` and `ungated` are identical to the decimal -- the degenerate gate
+again. Read the oracle rows, not `real`: under real regions the scoring depths and the audio-path
+masks diverge, so mask error mixes into the level reading.
+
+**2. `si_sdr_pooled` works, and is validated rather than merely plausible.** Bounded in **72 of 72**
+rows -- the property Test B verified zero of. Paired `real - oracle` on pooled gives `no_recursion`
+**-2.97 dB** against Stage A's depth-2 gap of **-3.11 dB**: a new metric landing within 0.14 dB of
+the established headline is strong evidence it measures the right thing. Where the whole-track
+number gave -13.17, pooled gives +5.25.
+
+**3. Both A5 guards clean.** Phase 3 per-depth rows: 144 shared, 0 differing, `max |delta| = 0.000e+00`.
+Phase 2 (Test E re-run, 25.3 min): 5400 rows, 0 differing, `max |delta| = 0.000e+00`, byte delta
+again pure line endings.
+
+#### Root cause: the training objective never constrained the level
+
+`dagger/losses/sisdr.py:20` fits `scale` out before measuring error. **SI-SDR is scale-invariant, so
+nothing in training ever told `G` what level to emit at**, and it drifted to 2.86x. Not a bug in the
+audio path, and the two candidates that looked likelier were both eliminated:
+
+* **Not the Stage-1 normalize/denormalize round trip.** It is scale-*equivariant*
+  (`module(k*x, e) == k*module(x, e)`, pinned by test), so it preserves whatever scale the network
+  produces -- it cannot set one.
+* **Not the crossfade.** `w_Ei + w_Oi = activity_i` is a partition of unity, and the measured
+  `alpha ~ 1` at depth 1 confirms the copy path is unity gain.
+
+*Why it took three phases.* Every metric in this project is scale-invariant, so no single number
+could ever have shown it. It is visible only as a DISAGREEMENT between two metrics with different
+scale behaviour -- which required the second metric to exist first. A defect invisible to the whole
+measurement suite does not show up as a bad number; it shows up as no number at all.
+
+#### What it does and does not cost
+
+* **No committed SI-SDR number is affected.** Every per-depth score is scale-invariant: in the
+  local sweep, depth 2 reads `-0.00` at gains of 1x, 3x, 10x, 100x and 1000x alike.
+* **What it does cost:** a ~9 dB jump at every solo->overlap seam (audible, ugly), plus anything
+  NOT scale-invariant -- a sum-to-mixture check, the noise-head reconstruction loss. The Phase 4
+  Whisper-WER concern was overstated in the run's own printed verdict: Whisper normalizes its input.
+* **It is self-limiting under dilation.** At 800 ms nearly everything goes through `G`, the gain
+  becomes uniform, and a uniform gain is just a volume knob.
+* **`dilation_v2` is NOT blocked** -- the run's canned verdict said it was, and that was wrong.
+  `si_sdr_pooled` is invariant to a per-region gain by construction, so the dilation operating point
+  read on it is uncontaminated.
+
+#### The Phase 2 implication, stated carefully
+
+Deflation SUBTRACTS each estimate into a running residual. An estimate 2.86x too loud
+**over-subtracts**, and the error compounds down the chain -- which is a mechanism for the +2.6 dB
+higher level error the deflation systems show. So some fraction of the measured accumulation penalty
+may be a calibration artifact rather than intrinsic accumulation.
+
+This does **not** threaten the ordering or CLAUDE.md §1's structural argument: `coarse_to_fine`
+never builds a residual and is immune by construction. It does mean the accumulation *magnitude*
+has a candidate fixable component, and it is one hypothesis for the recipe-dependent 1.8-vs-5.3 dB
+spread already on record. Testable: correct the level, re-measure the `n_accepted_before` curve.
+
+#### Code landed (suite 487 passed / 1 skipped, up from 475)
+
+All three default OFF, so every committed number still reproduces.
+
+* **`dagger/reconstruct/stitch.py::match_level_to_mixture`** + `rescale_to_mixture` on
+  `reconstruct_speaker`/`reconstruct_all`/`reconstruct_all_deflation` and `score_scene`. Takes the
+  least-squares scalar `c = <g, x_O> / <g, g>` over the emitted region. Uses **only the mixture, no
+  ground truth**, so unlike the two `oracle` flags it IS deployable. Exact in the ideal case (the
+  other speakers are near-orthogonal to `s_i`, so `c ~ 1/k`), and with real noise it shrinks
+  slightly -- the conservative direction. Refuses to act on a non-positive projection (sign flip) or
+  beyond `MAX_RESCALE = 8.0` (the scalar is then noise). The deflation path rescales against the
+  **running residual**, not `x_O`: that is the mixture each speaker was actually extracted from.
+* **`refine_embeddings(candidate_audio=...)`** -- embeds the candidate from the clean sources: the
+  perfect-extractor bound. Under it the gate judges the same clean clip, deliberately: judging
+  clean candidates with a gate looking at ~2 dB output rejected 100% of them, and the bound would
+  then measure the gate, which is `accept_fn`'s job. `run_phase3.py` refuses both oracle flags at
+  once for the same reason.
+* Configs: `phase3_librimix_3spk_refine_oracle_audio.yaml` (differs from the ceiling config by
+  `refine.oracle_audio` and `eval.tag` alone, so the two bounds pair row by row) and
+  `phase3_librimix_3spk_rescale.yaml` (`extractor.rescale_to_mixture: true`, `refine.rounds: 0`).
+* `tests/phase3/test_level_rescale_and_oracle_audio.py` (12 tests), including bit-identity with the
+  flags off and an end-to-end check that `level_error_db` collapses when the rescale is on.
+
+*One test-design note worth keeping.* The oracle-audio test first asserted the OUTPUT changes, and
+passed vacuously twice: a constant-gain stand-in extractor made `coarse_to_fine` independent of its
+embeddings, and then SI-SDR's scale invariance made gain-only steering unobservable. It now asserts
+on the GATE MARGIN (observable whether or not the gate accepts) plus a second end-to-end test with a
+permissive gate. Same shape as Test B: an assertion that cannot fail is not a passing assertion.
+
+#### The five open questions after this run
+
+| # | question | state | closes with |
+|---|---|---|---|
+| 1 | confidence gate | **Answered.** `V_i` J=+0.373 @1e-4; margin J=+0.046, not a detector | `vi_on`, 5.0 h -- expect a cost |
+| 2 | absolute quality | **Untouched.** oracle d2 = 1.73 dB; ~13% of Phase 1's per-depth exposure | Session C retrain |
+| 3 | solo/overlap masks | **Mechanism answered** (91% recovered @800 ms); operating point open, now unblocked | `dilation_v2`, 6.7 h, read `si_sdr_pooled` |
+| 4 | refinement window | **NEITHER END KNOWN** -- see below | `refine_ceiling` 1.7 h + `refine_oracle_audio` 1.7 h |
+| 5 | output level | **Root cause known**, fix implemented, unmeasured | `rescale` config |
+
+*On #4, a correction to how this file has framed it.* "Refinement is net-harmful, -0.07 to -0.54 dB"
+is an EFFECT SIZE, not a bound. The question is where refinement *works*, and that window has two
+axes: enrollment must be bad enough that improvement is possible, and `G` must be good enough that
+the candidate beats the enrollment. All four regimes tested to date -- clean, starved,
+heterogeneous, contaminated-real -- varied ENROLLMENT and held extractor quality fixed at one poor
+point. **The binding axis has never been swept.** The two bound runs bracket it: `oracle_ceiling`
+bounds the acceptance rule, `oracle_audio` bounds the extractor.
+
+#### Session plan
+
+* **Session 1 (~8.9 h):** `refine_ceiling` (1.7 h) + `dilation_v2` (6.7 h). No new code needed.
+* **Session 2 (~8.9 h):** `refine_oracle_audio` (1.7 h) + `rescale` (1.7 h) + `vi_on` (5.0 h).
+* **Session 3:** Session C training, for #2.
+
+One notebook with a `SESSION` constant, committed once per session; `levelcheck.ipynb`'s cells 1-4
+are the proven setup header. Keep the one-fatal-assertion discipline: the reproduction gate aborts,
+everything else diagnoses inline and reports a verdict.
+
 ### ☐ Phase 4 — Real corpora + full ablation
 
 **Goal:** the results section.
@@ -2317,6 +2452,15 @@ for the proposed system.
     energy lets a region the system happens to output loudly pull the pooled score toward its own
     value — reintroducing level sensitivity one level up. The target is ground truth; how much real
     speech sits at each depth is a property of the scene, not of the system.
+  - **A scale-invariant metric cannot see a level error, and this project's are ALL
+    scale-invariant.** `G` was measured emitting the overlap region at **2.86x** the true amplitude
+    (2026-08-23) after three phases in which no number could have revealed it — SI-SDR fits the
+    scale out before measuring error, so every per-depth score reads identically at 1x, 3x, 10x and
+    1000x. Root cause was the training objective: `si_sdr_loss` is scale-invariant, so nothing ever
+    constrained the output level. **A defect invisible to the whole measurement suite does not
+    appear as a bad number — it appears as no number at all**, and surfaces only as a disagreement
+    between two metrics with *different* scale behaviour. Keep `level_error_db` reported for exactly
+    that reason, and be suspicious of any quantity no committed metric could contradict.
   - **A guard that verifies zero rows is not a passing guard.** Test B (2026-08-23) required a
     `+inf` depth row that this corpus never produces, skipped all 288 rows, and printed PASS while
     the property it checked was violated in 271 of them. **Always print the count you verified, and
@@ -2374,6 +2518,21 @@ unmodified. **`V_i` fires** at 1e-4 (6/81), but at ~the predicted false-rejectio
 likely measures a cost. Of the four Stage A items: 1 answered, 2 untouched (Session C, critical
 path), 3 mechanism answered but the operating point needs the dilation sweep RE-RUN to read the new
 metric, 4 still unknown (B2, ~1.7 h, cheapest and unblocked).
+
+**2026-08-23 (later) — LEVEL-CHECK RUN; a fifth question opens** (see "LEVEL-CHECK RUN" in §5;
+suite **487 passed / 1 skipped**). `G` emits the overlap region at a median **2.86x** the true
+amplitude (`level_error_db` +9.14; deflation systems worse at 11.48 vs `no_recursion`'s 8.88).
+**Root cause is the training objective** — `si_sdr_loss` is scale-invariant, so nothing ever
+constrained the output level; it is not a bug in the audio path (normalize/denormalize is
+scale-equivariant, the crossfade is a partition of unity). **No committed SI-SDR number is
+affected**, since all of them are scale-invariant too — both A5 guards came back
+`max |delta| = 0.000e+00` on 144 and 5400 rows. `si_sdr_pooled` is now **validated**: bounded in
+72/72 rows, and its paired `real - oracle` of **-2.97 dB** lands within 0.14 dB of Stage A's -3.11.
+Implemented, all default OFF: a deployable mixture-projection rescale, and an oracle-**audio**
+refinement bound. The refinement question is re-framed — "-0.07 to -0.54 dB" is an effect size, not
+a bound; the working window has an enrollment axis (swept four times) and an extractor axis (never
+swept), and the two bound runs bracket it. `dilation_v2` is NOT blocked: pooled is gain-invariant
+by construction.
 
 Per-phase history lives in §5, not here — this footer is deliberately kept to a few lines so it
 cannot drift out of sync with it.*

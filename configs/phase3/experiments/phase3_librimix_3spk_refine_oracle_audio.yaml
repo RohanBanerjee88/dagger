@@ -1,0 +1,102 @@
+# Phase 3 Stage B: the PERFECT-EXTRACTOR bound on refinement.
+#
+# *** THIS RUN PRODUCES A NUMBER THAT IS NOT A SYSTEM. ***
+# `refine.oracle_audio: true` embeds refinement's candidate from the CLEAN
+# SOURCES instead of from G's output. Scoring-time only; never deployable.
+#
+# WHY IT EXISTS -- and why it is NOT a duplicate of the oracle CEILING run.
+# Refinement blends 0.5*e_enrolled + 0.5*e_from_extracted_overlap, so it can pay
+# only if the second term beats the first. Two things can make it fail, and they
+# are different axes:
+#
+#   * the ACCEPTANCE RULE cannot tell a good candidate from a bad one
+#       -> bounded by phase3_librimix_3spk_refine_ceiling.yaml (`oracle_ceiling`)
+#   * the CANDIDATE ITSELF is bad, because it is embedded from G's output, which
+#     sits near 1-2 dB and is therefore mostly artifacts
+#       -> bounded HERE
+#
+# Every "refinement is net-harmful" result this project has -- clean enrollment
+# (Phase 2, -0.07 to -0.54 dB), starved 150-800 ms, heterogeneous 4 s
+# (-0.36/-0.69), contaminated real diarization (Stage A, -0.49) -- varied
+# ENROLLMENT quality while holding extractor quality fixed at that one poor
+# operating point. Four samples of one point on the axis the mechanism says is
+# binding. This run moves that axis to its limit.
+#
+# HOW TO READ IT.
+#   * still negative -> refinement's premise is wrong regardless of how good G
+#     ever gets, and the idea can be closed out for good. `refine.rounds: 0`
+#     becomes final on a mechanism, not on an accumulation of negatives.
+#   * positive -> the working region EXISTS and its boundary lies between
+#     today's G and perfect. Refinement then becomes a question about the
+#     training budget (Session C), not about the update rule.
+#
+# The other three systems never refine, so they are unaffected and remain a
+# valid control WITHIN this run -- no cross-run comparison needed.
+#
+# Under this flag the gate judges the same clean clip the candidate was embedded
+# from. That is deliberate: the counterfactual is "what if G were perfect", and
+# in that world the gate sees the good audio too. Judging clean candidates with
+# a gate looking at ~2 dB output was tried first and rejected 100% of them --
+# the bound would then measure the gate, which is the other config's job.
+# run_phase3.py refuses both flags at once for the same reason.
+#
+# Everything except `refine.oracle_audio` and `eval.tag` is identical to the
+# ceiling config, so the two bounds pair row by row.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_refine_oracle_audio.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+# Identical corpus to the Stage A baseline and to B1, so all three pair row by
+# row on (scene, speaker, depth, system).
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 25
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  # oracle + real. Refinement's cost differed between them in Stage A
+  # (-0.69 dB oracle vs -0.49 dB real), so the ceiling is measured under both to
+  # see whether contamination is what refinement needs to pay off.
+  # `real_index_order` is dropped: it decomposes the V_i reordering, which this
+  # run does not ask about, and refinement takes no deflation order anyway.
+  arms: [oracle, real]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  # Must be > 0 or the ceiling measures nothing; run_phase3.py refuses the
+  # combination rather than writing a complete-looking table of no-ops.
+  rounds: 2
+  oracle_audio: true
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: refine_oracle_audio

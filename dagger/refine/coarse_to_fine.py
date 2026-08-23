@@ -86,6 +86,7 @@ def refine_embeddings(
     min_vad_coverage: float,
     max_artifact_score: float,
     accept_fn: Callable[[int, np.ndarray, np.ndarray], bool] | None = None,
+    candidate_audio: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[list[GateResult | None]]]:
     """Refine each speaker's embedding over ``rounds`` iterations.
 
@@ -143,6 +144,29 @@ def refine_embeddings(
     publishable negative result with a stated mechanism; a positive ceiling the
     real gate cannot find means the acceptance RULE is what is broken, not
     refinement. See :mod:`dagger.refine.oracle_ceiling`.
+
+    ``candidate_audio`` (``[S, T]``, default ``None``) replaces the audio the
+    candidate embedding is computed FROM. ``None`` -- the default and the only
+    deployable setting -- re-embeds this round's own reconstruction, and the
+    code path is then bit-identical to before this argument existed.
+
+    It exists for the other half of the refinement bracket. ``accept_fn`` bounds
+    the *acceptance rule*; this bounds the *extractor*. Refinement blends
+    ``0.5*e_enrolled + 0.5*e_from_extracted_overlap``, so for it to pay, the
+    second term must beat the first -- and it is embedded from ``G``'s output,
+    which currently sits near 1-2 dB and is therefore dominated by artifacts.
+    Every "refinement is net-harmful" result this project has (clean, starved,
+    heterogeneous, and contaminated real-diarization enrollment) varied
+    ENROLLMENT quality while holding extractor quality fixed at that one poor
+    operating point. Passing the clean sources here is the perfect-extractor
+    limit: if refinement still loses, its premise is wrong regardless of how
+    good ``G`` ever gets, and the idea can be closed out. If it wins, the
+    working region exists and its boundary lies between today's ``G`` and
+    perfect -- which makes refinement a question about the training budget, not
+    about the update rule.
+
+    Like ``accept_fn`` it reads ground truth and is **NOT DEPLOYABLE**; it is a
+    scoring-time bound only.
 
     The gate still runs and its verdict is still recorded when ``accept_fn`` is
     given -- ``GateResult.accepted`` reports what was actually committed, and
@@ -202,7 +226,16 @@ def refine_embeddings(
                     mean_variance=float("nan"),
                 )
                 continue
-            clip = outputs[i][start:end]
+            # Under `candidate_audio` the gate judges the SAME clip the
+            # candidate was embedded from, not the deployable pipeline's output.
+            # That is deliberate and it is what makes the counterfactual
+            # coherent: the question is "what would refinement be worth if `G`
+            # were perfect", and in that world the gate sees the good audio too.
+            # Judging clean-audio candidates with a gate looking at ~2 dB output
+            # was tried first and rejected 100% of them -- the bound then
+            # measures the gate rather than the extractor, which is the axis
+            # `accept_fn` already covers.
+            clip = outputs[i][start:end] if candidate_audio is None else candidate_audio[i][start:end]
 
             raw_embedding = encoder.embed(clip, sample_rate)
             blended = 0.5 * embeddings[i] + 0.5 * raw_embedding

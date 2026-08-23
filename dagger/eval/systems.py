@@ -229,6 +229,8 @@ def score_scene(
     order_policy: str = "variance",
     on_unenrollable: str = "raise",
     refine_oracle_ceiling: bool = False,
+    refine_oracle_audio: bool = False,
+    rescale_to_mixture: bool = False,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Run all four systems on one scene.
 
@@ -259,6 +261,16 @@ def score_scene(
       diarizer did — precisely the selection bias that silently shrank Phase 1's
       effective dataset (CLAUDE.md's `stagger_offsets` note). An unenrollable
       speaker is a real outcome and is reported, not hidden.
+
+    ``rescale_to_mixture`` corrects ``G``'s output level by least-squares
+    projection onto the mixture it was extracted from -- see
+    :func:`dagger.reconstruct.stitch.match_level_to_mixture`. Default ``False``,
+    which keeps every committed number reproducible; it uses no ground truth, so
+    unlike the two ``oracle`` flags below it IS deployable.
+
+    ``refine_oracle_audio`` embeds refinement's candidate from the clean sources
+    instead of ``G``'s output -- the perfect-extractor bound on refinement. NOT
+    DEPLOYABLE; see :func:`dagger.refine.coarse_to_fine.refine_embeddings`.
 
     ``refine_oracle_ceiling`` replaces refinement's confidence gate with a rule
     that reads the clean sources — see :mod:`dagger.refine.oracle_ceiling`. It is
@@ -350,17 +362,22 @@ def score_scene(
     deflation_idx: dict[int, int] = {i: j for j, i in enumerate(order)}  # speaker -> position in order
 
     outputs: dict[str, np.ndarray] = {}
-    outputs["no_recursion"] = reconstruct_all(x, x_O, activity, solo, embeddings, extractor, fade=fade)
+    outputs["no_recursion"] = reconstruct_all(
+        x, x_O, activity, solo, embeddings, extractor, fade=fade,
+        rescale_to_mixture=rescale_to_mixture,
+    )
 
     # Each deflation call binds its OWN result names: reusing one pair across
     # both calls would let the gated run's telemetry overwrite the ungated
     # run's and end up reported against the wrong system.
     outputs["ungated_deflation"], _, ungated_accepts = reconstruct_all_deflation(
         x, x_O, activity, solo, embeddings, extractor, order, gate_fn=None, fade=fade,
+        rescale_to_mixture=rescale_to_mixture,
     )
     gate_fn = make_gate_fn(embeddings, variances, activity, overlap, encoder, scene.sample_rate, gate_cfg)
     outputs["gated_deflation"], gated_gate_results, gated_accepts = reconstruct_all_deflation(
         x, x_O, activity, solo, embeddings, extractor, order, gate_fn=gate_fn, fade=fade,
+        rescale_to_mixture=rescale_to_mixture,
     )
 
     n_accepted_before = {
@@ -396,9 +413,13 @@ def score_scene(
         tau_margin=gate_cfg["tau_margin"], max_mean_variance=gate_cfg["max_mean_variance"],
         min_vad_coverage=gate_cfg["min_vad_coverage"], max_artifact_score=gate_cfg["max_artifact_score"],
         accept_fn=refine_accept_fn,
+        candidate_audio=(
+            np.stack([t for _, t in targets]) if refine_oracle_audio else None
+        ),
     )
     outputs["coarse_to_fine"] = reconstruct_all(
-        x, x_O, activity, solo, refined_embeddings, extractor, fade=fade
+        x, x_O, activity, solo, refined_embeddings, extractor, fade=fade,
+        rescale_to_mixture=rescale_to_mixture,
     )
 
     rows = []

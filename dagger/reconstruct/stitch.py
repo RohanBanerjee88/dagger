@@ -56,6 +56,60 @@ def crossfade_windows(
     return w_Ei, w_Oi
 
 
+#: Widest gain correction :func:`match_level_to_mixture` will apply, as a ratio.
+#: A projection this far from 1 means the estimate barely correlates with the
+#: mixture, where the least-squares scalar is noise rather than a calibration.
+MAX_RESCALE = 8.0
+
+
+def match_level_to_mixture(
+    g_out: np.ndarray, x_O: np.ndarray, w_Oi: np.ndarray
+) -> np.ndarray:
+    """Rescale ``G``'s output to the level implied by the overlap mixture.
+
+    Measured 2026-08-23: ``G`` emits the overlap region at a median **2.86x**
+    the true source amplitude (``level_error_db`` +9.14). The cause is not a bug
+    in the audio path -- it is that ``si_sdr_loss`` is scale-invariant
+    (``dagger/losses/sisdr.py``), so **nothing in training ever constrained the
+    output level**, and it drifted. Every SI-SDR in this project is likewise
+    scale-invariant, so the error was structurally invisible until the
+    whole-track and per-depth numbers were compared.
+
+    The correction uses only the mixture, never ground truth, so it is
+    deployable. Over the emitted region it takes the least-squares scalar::
+
+        c = <g, x_O> / <g, g>
+
+    which is exact in the ideal case: ``x_O = s_i + sum_{j!=i} s_j`` and the
+    other speakers are approximately orthogonal to ``s_i``, so if
+    ``g ~ k*s_i + n`` then ``<g, x_O> ~ k*||s_i||^2`` and ``c ~ 1/k``. With real
+    noise it shrinks slightly toward zero (it is the MMSE gain, not the exact
+    inverse), which is the conservative direction: under-correcting leaves a
+    smaller error than over-correcting.
+
+    Applied only where ``w_Oi > 0``. The solo path is a verbatim copy of the
+    mixture and is already at unity gain -- rescaling it could only introduce an
+    error. Refuses to act (returns ``g_out`` unchanged) when the projection is
+    degenerate: a non-positive numerator would flip the waveform's sign, and a
+    ratio beyond :data:`MAX_RESCALE` means the estimate is too weakly correlated
+    with the mixture for the scalar to mean anything.
+    """
+    g = np.asarray(g_out, dtype=np.float64)
+    mixture = np.asarray(x_O, dtype=np.float64)
+    mask = np.asarray(w_Oi, dtype=np.float64) > 0
+    if not mask.any():
+        return g
+
+    num = float(np.dot(g[mask], mixture[mask]))
+    den = float(np.dot(g[mask], g[mask]))
+    if den <= 0.0 or num <= 0.0:
+        return g
+    c = num / den
+    if not (1.0 / MAX_RESCALE) <= c <= MAX_RESCALE:
+        return g
+    return g * c
+
+
 def reconstruct_speaker(
     x: TrackedSignal,
     x_O: TrackedSignal,
@@ -64,6 +118,7 @@ def reconstruct_speaker(
     embedding: np.ndarray,
     extractor: Extractor,
     fade: int = 0,
+    rescale_to_mixture: bool = False,
 ) -> np.ndarray:
     """Reconstruct one speaker's waveform per CLAUDE.md §1.
 
@@ -79,8 +134,10 @@ def reconstruct_speaker(
     """
     w_Ei, w_Oi = crossfade_windows(solo_i, activity_i, fade=fade)
     x_samples = np.asarray(x, dtype=np.float64)
-    g_out = extractor.extract(x_O, embedding)  # guarded against residual inputs
-    return x_samples * w_Ei + np.asarray(g_out, dtype=np.float64) * w_Oi
+    g_out = np.asarray(extractor.extract(x_O, embedding), dtype=np.float64)  # guarded
+    if rescale_to_mixture:
+        g_out = match_level_to_mixture(g_out, np.asarray(x_O, dtype=np.float64), w_Oi)
+    return x_samples * w_Ei + g_out * w_Oi
 
 
 def reconstruct_all(
@@ -91,6 +148,7 @@ def reconstruct_all(
     embeddings: np.ndarray | None,
     extractor: Extractor,
     fade: int = 0,
+    rescale_to_mixture: bool = False,
 ) -> np.ndarray:
     """Reconstruct every speaker; returns an array of shape ``[S, T]``.
 
@@ -110,5 +168,6 @@ def reconstruct_all(
             embedding=emb,
             extractor=extractor,
             fade=fade,
+            rescale_to_mixture=rescale_to_mixture,
         )
     return outputs

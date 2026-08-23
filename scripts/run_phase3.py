@@ -210,6 +210,8 @@ def score_scene_all_arms(
     arm_failures: dict | None = None,
     dilate_ms_values: list[float] = (0.0,),
     refine_oracle_ceiling: bool = False,
+    refine_oracle_audio: bool = False,
+    rescale_to_mixture: bool = False,
     dilation_failures: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """Run every arm over one scene. Returns ``(score, gate, diarization)`` rows.
@@ -287,6 +289,8 @@ def score_scene_all_arms(
                     # no-op for oracle, where the scheduler guarantees solo audio.
                     on_unenrollable="drop",
                     refine_oracle_ceiling=refine_oracle_ceiling,
+                    refine_oracle_audio=refine_oracle_audio,
+                    rescale_to_mixture=rescale_to_mixture,
                 )
             except NoSoloRegionError as exc:
                 # Dilation shrinks solo regions, so a large enough value can
@@ -887,6 +891,20 @@ def main() -> int:
     refine_cfg = cfg.get("refine", {})
     refine_rounds = int(refine_cfg.get("rounds", 2))
     refine_oracle_ceiling = bool(refine_cfg.get("oracle_ceiling", False))
+    refine_oracle_audio = bool(refine_cfg.get("oracle_audio", False))
+    rescale_to_mixture = bool(cfg.get("extractor", {}).get("rescale_to_mixture", False))
+    if refine_oracle_audio and refine_rounds == 0:
+        raise SystemExit(
+            "refine.oracle_audio is on but refine.rounds is 0 -- refinement "
+            "never runs, so the perfect-extractor bound would measure nothing."
+        )
+    if refine_oracle_audio and refine_oracle_ceiling:
+        raise SystemExit(
+            "refine.oracle_audio and refine.oracle_ceiling are both on. They "
+            "bound DIFFERENT axes -- the extractor and the acceptance rule -- "
+            "and enabling both measures neither: a run that bounds two things "
+            "at once cannot attribute its result to either."
+        )
     if refine_oracle_ceiling and refine_rounds == 0:
         raise SystemExit(
             "refine.oracle_ceiling is on but refine.rounds is 0 -- refinement "

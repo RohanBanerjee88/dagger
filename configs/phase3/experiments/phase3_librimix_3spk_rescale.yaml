@@ -1,0 +1,96 @@
+# Phase 3 Stage B: does correcting G's OUTPUT LEVEL help?
+#
+# Unlike the two `oracle` bounds beside it, this one IS deployable -- the
+# correction uses only the mixture, never ground truth.
+#
+# THE MEASUREMENT THAT MOTIVATED IT (2026-08-23, levelcheck run, 3 scenes):
+# G emits the overlap region at a median 2.86x the true source amplitude
+# (`level_error_db` +9.14; oracle no_recursion 8.88, the deflation systems
+# 11.48, max 20.68). The solo path is a verbatim copy at unity gain, so the
+# output jumps ~9 dB at every solo->overlap seam.
+#
+# ROOT CAUSE, and it is not a bug in the audio path: `si_sdr_loss` is
+# scale-invariant (dagger/losses/sisdr.py), so NOTHING IN TRAINING EVER
+# CONSTRAINED THE OUTPUT LEVEL and it drifted. Every SI-SDR in this project is
+# likewise scale-invariant, which is why three phases of measurement could not
+# see it -- it surfaced only as a disagreement between the whole-track and
+# per-depth numbers.
+#
+# WHAT TO EXPECT. `si_sdr` per depth should barely move: it is scale-invariant,
+# so it cannot reward this. The columns that should move are `level_error_db`
+# (toward 0) and the whole-track `si_sdr` in _overall.csv. `si_sdr_pooled` is
+# invariant to a per-region gain by construction and is the control -- if it
+# shifts materially, the rescale is changing SHAPE, which it must not.
+#
+# The deflation systems are the interesting case. They SUBTRACT each estimate
+# into a running residual, so an estimate 2.86x too loud over-subtracts and the
+# error compounds down the chain -- which is the likely reason they measured a
+# higher level error than no_recursion. If correcting the level improves them
+# specifically, then part of Phase 2's measured accumulation penalty was a
+# calibration artifact rather than intrinsic accumulation, and the
+# `n_accepted_before` curve should be re-measured.
+#
+# NOTE the rescale is OFF by default everywhere else, deliberately: turning it
+# on changes the audio path, so every committed baseline would stop pairing.
+# This config is the one place it is on.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_rescale.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+# Identical corpus to the Stage A baseline and to B1, so all three pair row by
+# row on (scene, speaker, depth, system).
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 25
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  # oracle + real. Refinement's cost differed between them in Stage A
+  # (-0.69 dB oracle vs -0.49 dB real), so the ceiling is measured under both to
+  # see whether contamination is what refinement needs to pay off.
+  # `real_index_order` is dropped: it decomposes the V_i reordering, which this
+  # run does not ask about, and refinement takes no deflation order anyway.
+  arms: [oracle, real]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+  # THE ONE CHANGED LINE vs the Stage A baseline's extractor block.
+  rescale_to_mixture: true
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  # Must be > 0 or the ceiling measures nothing; run_phase3.py refuses the
+  # combination rather than writing a complete-looking table of no-ops.
+  # 0 -- the reported default. This run asks about the LEVEL, and
+  # leaving refinement on would vary two things at once.
+  rounds: 0
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: rescale
