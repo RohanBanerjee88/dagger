@@ -36,3 +36,9 @@ env/
 !/docs/theory.pdf
 
 checkpoints/
+
+# Kaggle notebooks — never committed. They are the run harness, not the record:
+# the reproducible artifact is scripts/run_phaseN.py + configs/*.yaml (§7), and
+# a notebook carries embedded outputs and session-specific paths that drift from
+# it. Results belong in results/, findings in CLAUDE.md.
+*.ipynb
