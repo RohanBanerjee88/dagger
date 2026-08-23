@@ -182,3 +182,32 @@ class TestLevelErrorIsMeasuredDirectly:
         assert ratio == pytest.approx(
             max(baseline.values()) / min(baseline.values()), rel=1e-6
         ), "a global rescale is not a level ERROR -- only cross-region disagreement is"
+
+
+class TestTheLevelErrorIsSigned:
+    """`+` means the extractor is too LOUD in the deeper region, `-` too quiet.
+    An unsigned max/min would collapse those onto one number, and they imply
+    different bugs."""
+
+    def _level(self, overlap_gain):
+        from dagger.eval.systems import _level_error_db
+
+        estimate, target, depth = _two_region_case(overlap_gain, shape_error=0.0)
+        return _level_error_db(estimate, target, depth)
+
+    def test_too_loud_is_positive(self):
+        assert self._level(4.0) == pytest.approx(20.0 * math.log10(4.0), rel=1e-6)
+
+    def test_too_quiet_is_negative(self):
+        assert self._level(0.25) == pytest.approx(20.0 * math.log10(0.25), rel=1e-6)
+
+    def test_a_consistent_level_is_zero(self):
+        assert self._level(1.0) == pytest.approx(0.0, abs=1e-9)
+
+    def test_one_scoreable_depth_is_nan(self):
+        from dagger.eval.systems import _level_error_db
+
+        target = np.array([1.0, 2.0, 3.0, 4.0])
+        assert math.isnan(
+            _level_error_db(target, target, np.ones(4, dtype=int))
+        )

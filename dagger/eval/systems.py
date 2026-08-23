@@ -111,18 +111,33 @@ ORDER_POLICIES = ("variance", "index")
 def _level_error_db(estimate: np.ndarray, target: np.ndarray, depth: np.ndarray) -> float:
     """How much the fitted SI-SDR gain disagrees across depth regions, in dB.
 
-    ``0`` means one consistent level explains the whole output; a large value
-    means the extractor's overlap-region output sits at a different level from
-    its (bit-exact) solo copy. Scale-invariant metrics cannot see this, which is
-    why it went unmeasured until the whole-track and per-depth numbers were
-    compared. ``nan`` when fewer than two depths are scoreable, since there is
-    nothing to disagree.
+    **Signed**, as ``20*log10(alpha_deepest / alpha_shallowest)``, and the sign
+    is the useful half. The shallowest depth is where the output is a verbatim
+    copy of the mixture, so its ``alpha`` is ~1 by construction and acts as the
+    reference; for an estimate ``c*s + n`` with ``n`` orthogonal to ``s`` the
+    fitted alpha IS ``c``. So this reads directly as the extractor's systematic
+    output gain error: **positive means `G` is too loud, negative too quiet.**
+
+    ``0`` means one consistent level explains the whole output. Scale-invariant
+    metrics cannot see any of this -- it went unmeasured until the whole-track
+    and per-depth numbers were compared (2026-08-23). ``nan`` when fewer than
+    two depths are scoreable, since then nothing can disagree.
+
+    An unsigned ``max/min`` would collapse "twice as loud" and "half as loud"
+    onto the same number, and those imply different bugs.
     """
     scales = depth_scale_factors(estimate, target, depth)
-    usable = [abs(a) for a in scales.values() if a and np.isfinite(a)]
+    usable = {k: a for k, a in scales.items() if a and np.isfinite(a)}
     if len(usable) < 2:
         return float("nan")
-    return float(20.0 * np.log10(max(usable) / min(usable)))
+    shallowest = usable[min(usable)]
+    deepest = usable[max(usable)]
+    if shallowest == 0.0:
+        return float("nan")
+    ratio = abs(deepest) / abs(shallowest)
+    if ratio == 0.0:
+        return float("nan")
+    return float(20.0 * np.log10(ratio))
 
 
 def deflation_order(variances: np.ndarray, policy: str = "variance") -> list[int]:
