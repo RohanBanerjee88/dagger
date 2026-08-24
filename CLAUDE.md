@@ -2292,8 +2292,11 @@ measurement suite does not show up as a bad number; it shows up as no number at 
 * **What it does cost:** a ~9 dB jump at every solo->overlap seam (audible, ugly), plus anything
   NOT scale-invariant -- a sum-to-mixture check, the noise-head reconstruction loss. The Phase 4
   Whisper-WER concern was overstated in the run's own printed verdict: Whisper normalizes its input.
-* **It is self-limiting under dilation.** At 800 ms nearly everything goes through `G`, the gain
-  becomes uniform, and a uniform gain is just a volume knob.
+* ~~**It is self-limiting under dilation.**~~ **WITHDRAWN 2026-08-24.** The prediction was that at
+  800 ms nearly everything goes through `G`, the gain becomes uniform, and a uniform gain is just a
+  volume knob. Session 1 measured the opposite: `level_error_db` GROWS with dilation
+  (8.78 -> 10.33 dB). No mechanism yet. Q3 and Q5 are therefore independent -- dilating does not
+  mitigate the level error.
 * **`dilation_v2` is NOT blocked** -- the run's canned verdict said it was, and that was wrong.
   `si_sdr_pooled` is invariant to a per-region gain by construction, so the dilation operating point
   read on it is uncontaminated.
@@ -2345,7 +2348,7 @@ permissive gate. Same shape as Test B: an assertion that cannot fail is not a pa
 |---|---|---|---|
 | 1 | confidence gate | **Answered.** `V_i` J=+0.373 @1e-4; margin J=+0.046, not a detector | `vi_on`, 5.0 h -- expect a cost |
 | 2 | absolute quality | **Untouched.** oracle d2 = 1.73 dB; ~13% of Phase 1's per-depth exposure | Session C retrain |
-| 3 | solo/overlap masks | **Mechanism answered** (91% recovered @800 ms); operating point open, now unblocked | `dilation_v2`, 6.7 h, read `si_sdr_pooled` |
+| 3 | solo/overlap masks | **Mechanism answered** (91% recovered @800 ms); operating point open, now unblocked -- *ANSWERED 2026-08-24: 400 ms, see Session 1* | `dilation_v2`, 6.7 h, read `si_sdr_pooled` |
 | 4 | refinement window | **NEITHER END KNOWN** -- see below | `refine_ceiling` 1.7 h + `refine_oracle_audio` 1.7 h |
 | 5 | output level | **Root cause known**, fix implemented, unmeasured | `rescale` config |
 
@@ -2366,6 +2369,127 @@ bounds the acceptance rule, `oracle_audio` bounds the extractor.
 One notebook with a `SESSION` constant, committed once per session; `levelcheck.ipynb`'s cells 1-4
 are the proven setup header. Keep the one-fatal-assertion discipline: the reproduction gate aborts,
 everything else diagnoses inline and reports a verdict.
+
+
+---
+
+**STAGE B -- SESSION 1 (2026-08-24): Q3 ANSWERED (dilate 400 ms, recovering 63% of the
+diarization cost) and Q4's ACCEPTANCE-RULE AXIS CLOSED (a perfect rule is worth +0.18 dB, so the
+rule is not what is broken). Q5 confirmed at 25-scene scale and worse than predicted. Two runs,
+~8.7 h, both from committed configs unmodified.**
+
+Artifacts: `results/phase3/experiments/experiment_stage_B_run_2/{dilation_v2,refine_ceiling}/`,
+each split `numbers_csv/` + `numbers_md_docs/` per §7. Checkpoint unchanged (clip50); no training.
+
+#### Q3 -- the dilation operating point is 400 ms, and it is an INTERIOR optimum
+
+`real` / `no_recursion` / **`si_sdr_pooled`** (the exchange rate -- NOT the whole-track `si_sdr`):
+
+| dilate | 0 ms | 200 ms | 400 ms | 800 ms |
+|---|---|---|---|---|
+| `real` pooled | 3.02 | 4.29 | **4.91** | 3.55 |
+| `oracle` pooled | 6.03 | 4.73 | 3.63 | 1.76 |
+| paired `real - oracle@0ms` | -3.01 +-0.27 | -1.74 +-0.20 | **-1.12 +-0.20** | -2.48 +-0.28 |
+| win rate vs oracle@0ms | 9% | 12% | **23%** | 16% |
+
+**63% of the oracle-vs-real gap recovered** (-3.01 -> -1.12 dB) with no retraining.
+
+*Why this supersedes run 1's read.* Run 1 had no pooled metric and its per-depth story pointed at
+800 ms; on `si_sdr_pooled` 800 ms is clearly past the peak. The optimum is **interior**, which is
+the first time an un-stratified number here has produced one rather than a monotone -- a metric
+that only ever says "more is better" is not weighing anything. This is the payoff of the
+2026-08-23 metric fix, and it changed the answer.
+
+*Two sanity checks that the mechanism is the intended one.* The `oracle` arm declines
+**monotonically** (6.03 -> 1.76): dilating already-perfect masks buys no recall and only pays false
+alarm, exactly as it should. And at 400 ms `real` (4.91) **overtakes** `oracle` (3.63) at the same
+dilation -- recovery of missed overlap outrunning the over-extraction cost, which can only happen
+in the arm that had missed overlap to recover.
+
+Per-depth, `no_recursion`, showing the trade the pooled number is netting:
+
+| | 0 ms | 200 ms | 400 ms | 800 ms |
+|---|---|---|---|---|
+| oracle d1 / d2 | 55.34 / 1.69 | 14.57 / 1.70 | 9.13 / 1.71 | 3.16 / 1.71 |
+| real d1 / d2 | 41.81 / -1.29 | 39.24 / 0.02 | 25.95 / 1.02 | 10.27 / 1.41 |
+
+Read the `real` row: depth 2 climbs **-1.29 -> +1.41** while depth 1 falls 41.81 -> 10.27. Neither
+column alone answers "is this better"; that is precisely the exchange-rate problem, and pooled nets
+them at +1.89 dB in favour of 400 ms.
+
+**Action: `dilate_overlap_ms: 400` becomes the default**, and the Stage A gap should be re-reported
+with it.
+
+#### Q4 -- the acceptance-rule axis is CLOSED. A perfect rule is worth +0.18 dB.
+
+Ceiling deficit `coarse_to_fine - no_recursion`, paired, n=75:
+
+| arm | depth 2 | \|t\| | win |
+|---|---|---|---|
+| oracle | **+0.141** +-0.049 | 2.9 | 25% |
+| real | **+0.177** +-0.034 | 5.3 | 41% |
+
+**Positive, as it must be** -- an acceptance rule that only ever commits improvements cannot do
+worse than committing nothing, and committing nothing IS `no_recursion`. Run 1's version came in
+NEGATIVE, which is what exposed the mis-specified objective (it scored the whole waveform while the
+table reported depth 2). The 2026-08-20 fix is confirmed working on real data.
+
+**But the magnitude is the result.** +0.18 dB is the ABSOLUTE MAXIMUM any acceptance rule could
+deliver on this extractor, against the deployable gate's measured **-0.5 dB**. And the gate is
+barely missing that headroom: `ceiling_accept_gate_would_reject` fired **4 of 150** (oracle) and
+**6 of 150** (real) -- about 4%.
+
+*The gate's actual failure is the other direction.* `ceiling_reject_gate_would_accept` fired **78**
+and **63** times: the gate waves through a large majority of candidates the ground truth says are
+worse. It is too permissive, not too strict -- exactly what a margin scoring J = +0.046 predicts,
+and it means raising `tau_margin` is the wrong lever (it would tighten the wrong direction).
+
+**Conclusion: refinement's deficit is NOT an acceptance problem.** The levers Phase 2 listed for a
+"positive ceiling the gate cannot find" -- variance-weighted blend, embedding the lowest-depth
+frames -- are all rule improvements, and the ceiling says the entire rule axis is worth <= 0.18 dB.
+`refine.rounds: 0` stands. **One axis remains: the extractor** (`refine_oracle_audio`, Session 2).
+
+#### Q5 -- level error replicates at scale, and my "self-limiting" prediction was WRONG
+
+Median `level_error_db`, `no_recursion` vs the deflation systems:
+
+| arm / system | 0 ms | 200 ms | 400 ms | 800 ms |
+|---|---|---|---|---|
+| oracle `no_recursion` | 8.78 | 9.15 | 9.51 | 10.33 |
+| oracle `ungated`/`gated` | **13.66** | 14.03 | 14.38 | 15.24 |
+| oracle `coarse_to_fine` | 8.20 | 8.57 | 8.86 | 9.70 |
+
+* **Replicates.** 8.78 dB here against 8.88 on the 3-scene probe.
+* **The deflation gap WIDENED**: +4.88 dB over `no_recursion` at 25 scenes, against +2.60 dB at 3
+  scenes. Stronger support for the over-subtraction mechanism -- an estimate 2.86x too loud
+  over-subtracts into the residual and the error compounds down the chain.
+* **It is NOT self-limiting under dilation.** The LEVEL-CHECK note above predicted the gain would
+  become uniform as more of the track goes through `G`, making it a harmless volume knob. It does
+  the opposite: 8.78 -> 10.33 dB as dilation grows. That prediction is withdrawn; there is no
+  mechanism for the increase yet. It also means dilating to 400 ms does not mitigate Q5, and the
+  two fixes are independent.
+
+#### Q1 and Q2 -- one confirming point, and one untouched
+
+* **Q1.** The ceiling run's gate accepted 27/150 (oracle) and 49/150 (real) while the ground-truth
+  rule rejected 78 and 63 of what it accepted. Consistent with the dead margin; no new information
+  about `V_i`, which `vi_on` still has to price.
+* **Q2.** oracle depth 2 = **1.69 dB**, against Stage A's 1.73. Nothing in this session changed
+  training, so nothing could have moved it. Note Q4 now routes back here: refinement cannot pay
+  until the extractor improves, whatever the acceptance rule.
+
+#### The five questions after Session 1
+
+| # | question | state | closes with |
+|---|---|---|---|
+| 1 | confidence gate | **Answered**; deployed cost unpriced | `vi_on`, 5.0 h -- expect a cost |
+| 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
+| 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap recovered** | make it the default; re-report Stage A |
+| 4 | refinement window | **Rule axis CLOSED (<= +0.18 dB).** Extractor axis open | `refine_oracle_audio`, 1.7 h |
+| 5 | output level | **Confirmed at scale**, worse for deflation, grows with dilation | `rescale`, 1.7 h |
+
+**Session 2 (~8.9 h), all configs already committed:** `refine_oracle_audio` (1.7 h) + `rescale`
+(1.7 h) + `vi_on` (5.0 h). After it, only Q2 remains, and it is the one that gates Q4 and Q1.
 
 ### ☐ Phase 4 — Real corpora + full ablation
 
@@ -2547,6 +2671,21 @@ refinement bound. The refinement question is re-framed — "-0.07 to -0.54 dB" i
 a bound; the working window has an enrollment axis (swept four times) and an extractor axis (never
 swept), and the two bound runs bracket it. `dilation_v2` is NOT blocked: pooled is gain-invariant
 by construction.
+
+**2026-08-24 — Stage B SESSION 1: two of the five questions move** (see "STAGE B — SESSION 1" in
+§5). **Q3 is ANSWERED — dilate 400 ms**, recovering **63%** of the oracle-vs-real gap
+(−3.01 → −1.12 dB paired, win rate 9% → 23%) with no retraining. The optimum is **interior** (800 ms
+is past the peak), which reverses run 1's per-depth read and is the payoff of the `si_sdr_pooled`
+fix — a metric that only ever says "more is better" was not weighing anything. **Q4's
+acceptance-rule axis is CLOSED**: the corrected ceiling is now correctly *positive* (+0.14 / +0.18 dB,
+|t| 2.9 / 5.3), but that is the ceiling — a perfect rule is worth ≤ 0.18 dB against the deployable
+gate's −0.5 dB, and the gate misses only ~4% of it (`ceiling_accept_gate_would_reject` 4 and 6 of
+150). The gate's real failure is being too PERMISSIVE (`ceiling_reject_gate_would_accept` 78 and
+63), so raising `tau_margin` is the wrong lever. Every remaining refinement idea on record is a rule
+improvement, so the whole family is bounded — **only the extractor axis is left**. **Q5 replicates**
+(8.78 vs 8.88 dB) and the deflation gap **widened** to +4.88 dB; the earlier "self-limiting under
+dilation" prediction is **withdrawn** — it grows instead, so Q3 and Q5 are independent. Q2 is
+untouched at 1.69 dB and now gates Q4 and Q1.
 
 Per-phase history lives in §5, not here — this footer is deliberately kept to a few lines so it
 cannot drift out of sync with it.*
