@@ -140,6 +140,10 @@ dagger/
 │   └── metrics/              # SI-SDR/SDR, margin (eval encoder), Whisper WER
 ├── scripts/                  # run_phaseN.py entrypoints
 ├── tests/                    # unit tests, esp. the "no residual in audio path" guard
+├── journal/                  # per-phase working record (how each verdict was reached)
+│   ├── phase1.md
+│   ├── phase2.md
+│   └── phase3.md
 └── docs/
     ├── diarization_full_mathematical_theory.pdf   # the full proof doc (12 sections + master
     │                                               # theorem) -- the why behind every module
@@ -409,7 +413,13 @@ for the proposed system.
 
 ## 8. If you're unsure
 
+- **How did we get to this number?** → `journal/phase{1,2,3}.md`, the full working record per phase.
+  §5 carries each phase's verdict and status table; the journal carries how it was reached — the
+  failed runs, the void runs, and the diagnoses. Read the relevant one before changing anything that
+  phase measured.
 - **Why does a module exist?** → `docs/diarization_full_mathematical_theory.pdf`, matched section numbers.
+  Note this file and the glossary below are **gitignored and local-only** — a fresh clone does not
+  have them, so nothing a claim rests on may live there.
 - **Is this change safe?** → re-check §1 and §2. If it touches the audio path or the loss,
   be extra careful.
 - **Numbers look too good?** → suspect ground-truth leakage or metric-encoder reuse first.
@@ -418,75 +428,85 @@ for the proposed system.
   personal notes — convenience, not source of truth. Anything a claim rests on belongs in this
   file: the statistical reporting rules are §7, the settled maths is §2.
 
+
 ---
 
-*Last updated: 2026-08-20 — Phase 3 Stage B **Session B** landed, plus its follow-up probe (see
-§5 Phase 3; suite **440 passed / 1 skipped**). Four results, two of which overturn standing
-conclusions. (1) **Overlap dilation recovers 91% of the oracle-vs-real gap at depth 2**
-(-2.98 → **-0.28 dB**, 52% win rate against oracle diarization) with no retraining — and the oracle
-arm priced §2's "copy, don't separate" at **43.9 dB** for the first time. (2) **`V_i` works**:
-J = +0.373 at a **1e-4** threshold, so four prior "structurally dead" conclusions were a threshold
-error — the shipped `0.05` sits 500× above the usable range. (3) **`tau_margin` does not
-discriminate on `G`'s output** (J = +0.046), and the conditioning probe showed the fault fixture was
-valid: clip50 steers at 9.41 dB, so the swapped population really was different audio. Phase 2's
-gated-vs-ungated comparison is weakened accordingly. *[Scope corrected 2026-08-25: this footer
-originally read "`tau_margin` is NOT a detector", a verdict on the formula. Session 3's clean-margin
-probe measured J = **+0.453** on clean audio, so the formula is sound and only starved by the
-extractor — the weakening of Phase 2's comparison stands at this checkpoint, its cause does not.]* (4) The **refinement ceiling was mis-specified** — it scored the whole
-waveform while the table reported depth 2 — so its number is void and the headroom question is
-*unknown*; fixed and queued for re-run. The probe also produced the phase's most useful synthesis:
-**every check that embeds `G`'s output is gated on `G`'s quality**, which explains the dead margin,
-the rubber-stamping gate and net-harmful refinement as one root cause, and predicts they recover
-together only when the extractor does — so Session C's training budget, not a gate redesign, is the
-lever. Stage A's headline is unchanged and now explained. Phase 1 and Phase 2 DoDs remain met.
+## 9. Defects this project has shipped (read this before trusting a result)
 
-**2026-08-23 — Stage B VERIFICATION PASS complete** (see "STAGE B — VERIFICATION PASS" in §5;
-suite now **471 passed / 1 skipped**). All five checks ran. **Test E is closed as benign**: values
-bit-identical on all 5400 rows, the byte delta is exactly line endings (5401 CR + 1 LF = 5402), so
-the A5 guard needs narrowing to a value tolerance, not abandoning. **Test B passed vacuously** — its
-guard required a `+inf` depth row this corpus never produces, so it verified 0 of 288 rows — and it
-was hiding a real defect: the un-stratified `si_sdr` added in `9f62f4b` is **level-dominated**, sat
-below every depth it appeared to summarise in **271 of 288 rows**, and correlated **−0.21** with
-depth 1. Root cause is not a wiring bug but the one-scale-per-slice property in §7: reproduced by
-holding an estimate's shape fixed and moving only its overlap gain, which leaves every per-depth
-score bit-identical while the whole-track number falls 13 dB. **Fixed**: `si_sdr_pooled` (the
-bounded, gain-invariant exchange rate — compare configurations on this) and `level_error_db` (the
-extractor level error, which every scale-invariant metric in this project was structurally unable
-to see). Phase 2 CSVs are unaffected — `SCORE_FIELDS`/`GATE_FIELDS` untouched, `run_phase2.py`
-unmodified. **`V_i` fires** at 1e-4 (6/81), but at ~the predicted false-rejection rate, so `vi_on`
-likely measures a cost. Of the four Stage A items: 1 answered, 2 untouched (Session C, critical
-path), 3 mechanism answered but the operating point needs the dilation sweep RE-RUN to read the new
-metric, 4 still unknown (B2, ~1.7 h, cheapest and unblocked).
+Extracted 2026-08-25 from the phase journals, which is where each of these was diagnosed. They are
+here because a lesson that prevents a mistake has to be in the file that gets read, not behind a
+pointer. §7 covers the *statistical* half (which slice, scale-invariance, zero-row guards); this
+section is the *engineering* half.
 
-**2026-08-23 (later) — LEVEL-CHECK RUN; a fifth question opens** (see "LEVEL-CHECK RUN" in §5;
-suite **487 passed / 1 skipped**). `G` emits the overlap region at a median **2.86x** the true
-amplitude (`level_error_db` +9.14; deflation systems worse at 11.48 vs `no_recursion`'s 8.88).
-**Root cause is the training objective** — `si_sdr_loss` is scale-invariant, so nothing ever
-constrained the output level; it is not a bug in the audio path (normalize/denormalize is
-scale-equivariant, the crossfade is a partition of unity). **No committed SI-SDR number is
-affected**, since all of them are scale-invariant too — both A5 guards came back
-`max |delta| = 0.000e+00` on 144 and 5400 rows. `si_sdr_pooled` is now **validated**: bounded in
-72/72 rows, and its paired `real - oracle` of **-2.97 dB** lands within 0.14 dB of Stage A's -3.11.
-Implemented, all default OFF: a deployable mixture-projection rescale, and an oracle-**audio**
-refinement bound. The refinement question is re-framed — "-0.07 to -0.54 dB" is an effect size, not
-a bound; the working window has an enrollment axis (swept four times) and an extractor axis (never
-swept), and the two bound runs bracket it. `dilation_v2` is NOT blocked: pooled is gain-invariant
-by construction.
+**Every defect below has the same signature: a plausible number, and nothing failing.** Not one
+announced itself as an error. That is the thing to be paranoid about — a run that crashes costs an
+afternoon, a run that returns a believable wrong number costs a conclusion.
 
-**2026-08-24 — Stage B SESSION 1: two of the five questions move** (see "STAGE B — SESSION 1" in
-§5). **Q3 is ANSWERED — dilate 400 ms**, recovering **63%** of the oracle-vs-real gap
-(−3.01 → −1.12 dB paired, win rate 9% → 23%) with no retraining. The optimum is **interior** (800 ms
-is past the peak), which reverses run 1's per-depth read and is the payoff of the `si_sdr_pooled`
-fix — a metric that only ever says "more is better" was not weighing anything. **Q4's
-acceptance-rule axis is CLOSED**: the corrected ceiling is now correctly *positive* (+0.14 / +0.18 dB,
-|t| 2.9 / 5.3), but that is the ceiling — a perfect rule is worth ≤ 0.18 dB against the deployable
-gate's −0.5 dB, and the gate misses only ~4% of it (`ceiling_accept_gate_would_reject` 4 and 6 of
-150). The gate's real failure is being too PERMISSIVE (`ceiling_reject_gate_would_accept` 78 and
-63), so raising `tau_margin` is the wrong lever. Every remaining refinement idea on record is a rule
-improvement, so the whole family is bounded — **only the extractor axis is left**. **Q5 replicates**
-(8.78 vs 8.88 dB) and the deflation gap **widened** to +4.88 dB; the earlier "self-limiting under
-dilation" prediction is **withdrawn** — it grows instead, so Q3 and Q5 are independent. Q2 is
-untouched at 1.69 dB and now gates Q4 and Q1.
+- **A flag can be read, validated, warned about — and never forwarded.** `run_phase3.py`'s `main()`
+  computed `refine.oracle_audio` and `extractor.rescale_to_mixture`, printed guidance about them,
+  and passed neither to the scorer. Both silently defaulted to `False`, and **~3.4 h of GPU**
+  produced output bit-identical to a plain run, read as a result (2026-08-24).
+  *Why nothing caught it:* every test drove `score_scene` directly, so the **config-to-call-site
+  wiring was covered nowhere**. Unit-testing the function you wrote does not test the path the
+  program takes to it. Guarded now by
+  `tests/phase3/test_run_phase3_arms.py::TestConfigFlagsReachScoreScene`.
+  **When adding a flag, add a run that would visibly differ, and assert it does.**
 
-Per-phase history lives in §5, not here — this footer is deliberately kept to a few lines so it
-cannot drift out of sync with it.*
+- **"It never fires" is not evidence that a check is useless.** `V_i` was declared "structurally
+  dead" **four separate times** on the observation that it never crossed `max_mean_variance: 0.05`.
+  The threshold was **500x above its entire usable range**; at 1e-4 it scores J = +0.373 and costs
+  nothing. Each observation was right and each inference was wrong.
+  **A check that never fires needs a fault fixture, not a conclusion.** `min_vad_coverage` (0
+  rejections in 10,950 decisions) and `max_artifact_score` (45) are in exactly that position today
+  and are still unexamined.
+
+- **Measuring one point on an axis and calling it a property of the design.** Twice:
+  refinement was declared net-harmful after four regimes that all varied ENROLLMENT quality at one
+  fixed, poor extractor; `tau_margin` was declared "not a detector" from J = +0.046 measured on
+  `G`'s ~2 dB output. Both collapsed when the unswept axis was finally swept — the margin scores
+  **J = +0.453** on clean audio.
+  **Before writing "X does not work", name the axes X depends on and say which ones you varied.**
+
+- **A test that cannot fail is not a passing test.** The oracle-audio test passed vacuously *twice*
+  before it was right: first a constant-gain stand-in extractor made `coarse_to_fine` independent of
+  its embeddings, then SI-SDR's scale invariance made gain-only steering unobservable. Same shape as
+  Test B verifying 0 of 288 rows while printing PASS.
+  **Deliberately break the thing under test and confirm the test goes red.** Every guard added since
+  has been verified that way.
+
+- **A notebook that overrides a config in-kernel breaks §7 silently.** Stage B run 1 mutated its
+  configs to fit a session budget, wrote the mutated copies to `/kaggle/working`, and never brought
+  them back. The committed results stopped regenerating from the committed configs, and nothing
+  failed. **Vary the config file, or write the effective config back beside the results.**
+
+- **Byte-identity is the wrong guard across environments.** The Phase 2 A5 check failed on hashes
+  while all 5400 values were bit-identical — the delta was 5401 CR + 1 LF, i.e. line endings. A byte
+  comparison tests the csv dialect, the float repr and the CUDA stack as much as it tests the code.
+  **Compare parsed values within a tolerance** (every shared key present, `max |delta| < 1e-3 dB`).
+
+- **The tables were right and the FIGURE was wrong, every time.** Each figure defect shipped here had
+  the `.md` carrying `n`, spread and diagnostic counts while the plot carried a bare mean line — an
+  **n=3** point drawn as a headline trend, a control that had stopped being flat. The fix was not
+  more flags but **safe defaults**: error bars on unless switched off, thin points drawn hollow and
+  excluded from trend lines, preconditions computed rather than remembered.
+
+- **Two variables in one column.** Depth measures intrinsic difficulty and hits all four systems
+  equally; accumulation is the evidence axis. Plotting against depth buried the effect for **five
+  runs** before the axes were separated — and no retraining was involved, the quantity had been in
+  the pipeline the whole time, merely never recorded. The same mistake nearly recurred when a
+  six-point dilation sweep would have averaged six pipelines into one cell labelled "depth 2".
+
+- **A defect invisible to the whole measurement suite appears as no number at all.** `G` emitted the
+  overlap region at **2.86x** the correct amplitude for three phases. Every metric here is
+  scale-invariant, so no single number could ever have shown it; it surfaced only as a
+  *disagreement* between two metrics with different scale behaviour, which required the second
+  metric to exist first. **Be suspicious of any quantity no committed metric could contradict.**
+
+---
+
+*Where to start: §5's per-phase status tables are the current state; `journal/phase{1,2,3}.md` is
+how each was reached; §9 is what has gone wrong before. Recency lives in `git log` and in each
+journal's tail, not here — this file deliberately carries no dated changelog, because a third copy
+of the state is where claims go stale. The footer this replaced (removed 2026-08-25) had grown to
+71 lines, still announced itself as "Last updated: 2026-08-20", and contained no number that was
+not already in §5 and the journal.*
