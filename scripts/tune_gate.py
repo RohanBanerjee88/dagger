@@ -69,7 +69,7 @@ from dagger.enroll.encoder import TitaNetEncoder
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
 from dagger.gate.confidence import gate_diagnostics
-from dagger.reconstruct.stitch import reconstruct_all
+from dagger.reconstruct.stitch import crossfade_windows, reconstruct_all
 
 DIAGNOSTIC_FIELDS = [
     "scene", "speaker", "m", "population",
@@ -81,6 +81,9 @@ DIAGNOSTIC_FIELDS = [
 # is costing real quality.
 HONEST, CONTAMINATED = "honest", "contaminated"
 CORRECT, SWAPPED = "correct", "swapped"
+#: The Q1b pair (2026-08-25): the same correct/swapped contrast, but with a
+#: PERFECT extractor substituted for ``G``. See :func:`measure_scene`.
+CLEAN_CORRECT, CLEAN_SWAPPED = "clean_correct", "clean_swapped"
 
 # Below this Youden's J, the best candidate is not meaningfully separating the
 # two populations and no value in the grid is a real detector. Reported as a
@@ -198,6 +201,48 @@ def measure_scene(
         if num_speakers > 1 else None
     )
 
+    # ---- Q1b: the same contrast with a PERFECT extractor ---------------------
+    # `tau_margin` scored J = +0.046 on the `correct`/`swapped` pair above, and
+    # this file concluded "not a detector". But the margin is computed on `G`'s
+    # OUTPUT, which sits near 2 dB and is mostly distortion -- and that
+    # distortion contaminates cos(s_hat, e_i) and cos(s_hat, e_j) equally, so
+    # the margin can collapse toward 0 whether the extraction was right or
+    # wrong. That verdict is therefore one point on the EXTRACTOR axis, not a
+    # property of the formula (the same error this project made about
+    # refinement, corrected 2026-08-24).
+    #
+    # These two populations substitute the clean source for `G`'s output,
+    # keeping the reconstruction otherwise identical (`x*w_Ei + s*w_Oi` is
+    # exactly `reconstruct_all` with a perfect `G`). Read the sweep as:
+    #
+    #   separates  -> the FORMULA is sound and purely gated on `G`'s quality.
+    #                 It recovers when the extractor does; no gate redesign.
+    #   does not   -> the margin is broken independently of `G` and needs
+    #                 replacing, not re-tuning.
+    #
+    # NOT DEPLOYABLE: it reads `scene.sources`. It is a bound, like the two
+    # oracle refinement flags.
+    #
+    # Requires row i to BE source i, which holds under oracle regions and not
+    # under a real diarizer's anonymous clusters. Skipped loudly rather than
+    # silently when it does not hold -- a probe that quietly measures nothing is
+    # the failure mode that cost this project a whole verification check.
+    clean_correct = clean_swapped = None
+    if list(speakers) == list(scene.speakers):
+        sources = np.asarray(scene.sources, dtype=np.float64)
+        rolled = np.roll(sources, 1, axis=0)  # matches np.roll(embeddings, 1)
+        x_samples = np.asarray(x, dtype=np.float64)
+        clean_correct = np.zeros_like(sources)
+        clean_swapped = np.zeros_like(sources)
+        for i in range(num_speakers):
+            w_Ei, w_Oi = crossfade_windows(solo[i], activity[i], fade=fade)
+            clean_correct[i] = x_samples * w_Ei + sources[i] * w_Oi
+            clean_swapped[i] = x_samples * w_Ei + rolled[i] * w_Oi
+    else:
+        print(f"[tune_gate] scene {scene.name!r}: clean-margin arm SKIPPED -- "
+              f"rows are diarizer clusters {list(speakers)[:3]}..., not "
+              f"scene speakers. Run this probe with oracle regions.")
+
     rows: list[dict] = []
     for i, spk in enumerate(speakers):
         others = [embeddings[j] for j in range(num_speakers) if j != i]
@@ -225,6 +270,9 @@ def measure_scene(
             rows.append(_row(CONTAMINATED, outputs_correct[i], contaminated_variances[i]))
         if outputs_swapped is not None:
             rows.append(_row(SWAPPED, outputs_swapped[i], variances[i]))
+        if clean_correct is not None and num_speakers > 1:
+            rows.append(_row(CLEAN_CORRECT, clean_correct[i], variances[i]))
+            rows.append(_row(CLEAN_SWAPPED, clean_swapped[i], variances[i]))
     return rows
 
 
@@ -457,7 +505,7 @@ def main() -> int:
     }
 
     counts = {p: sum(1 for r in rows if r["population"] == p) for p in
-              (HONEST, CONTAMINATED, CORRECT, SWAPPED)}
+              (HONEST, CONTAMINATED, CORRECT, SWAPPED, CLEAN_CORRECT, CLEAN_SWAPPED)}
     lines = [
         "# Confidence-gate threshold selection (dev split)", "",
         f"rows: {len(rows)}  |  populations: " +
@@ -477,6 +525,33 @@ def main() -> int:
         rows, "margin", grids["tau_margin"],
         healthy=CORRECT, faulty=SWAPPED, reject_below=True,
     )
+    # Q1b: the same margin sweep with a PERFECT extractor. Rendered only when
+    # the clean arm actually ran -- an empty table would read as "the margin
+    # found nothing" rather than "this probe did not execute".
+    n_clean = sum(1 for r in rows if r["population"] == CLEAN_CORRECT)
+    lines += ["", "## Q1b -- is the margin broken, or just starved by `G`?", ""]
+    if n_clean == 0:
+        lines += [
+            "_(clean-margin arm did not run: rows are diarizer clusters, not scene",
+            "speakers. Re-run this probe with oracle regions -- the question is about",
+            "the FORMULA, and a real diarizer only adds a confound.)_", "",
+        ]
+    else:
+        lines += [
+            f"Same contrast as `tau_margin` above (n={n_clean} per population), but the",
+            "clean source is substituted for `G`'s output -- i.e. what the margin would",
+            "score if the extractor were perfect. **NOT DEPLOYABLE**; it is a bound.", "",
+            "* **Separates** -> the formula is sound and purely gated on `G`'s quality.",
+            "  It recovers when the extractor does, and no gate redesign is warranted;",
+            "  `tau_margin`'s J = +0.046 was a statement about this checkpoint, not",
+            "  about `M_i`.",
+            "* **Does not separate** -> the margin is broken independently of `G` and",
+            "  needs REPLACING rather than re-tuning.", "",
+        ]
+        lines += _detection_sweep(
+            rows, "margin", grids["tau_margin"],
+            healthy=CLEAN_CORRECT, faulty=CLEAN_SWAPPED, reject_below=True,
+        )
     lines += ["", "## Rate sweeps (no fault population)"]
     lines += _rate_sweep(rows, "vad_coverage", grids["min_vad_coverage"], reject_below=True)
     lines += _rate_sweep(rows, "artifact_score", grids["max_artifact_score"], reject_below=False)

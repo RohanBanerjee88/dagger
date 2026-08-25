@@ -1,0 +1,81 @@
+# Phase 3 Stage B Session 3, Q1b: IS THE MARGIN BROKEN, OR JUST STARVED BY `G`?
+#
+# *** THIS RUN PRODUCES A BOUND, NOT A DEPLOYABLE NUMBER. ***
+# The `clean_correct`/`clean_swapped` populations substitute the CLEAN SOURCE for
+# `G`'s output, so they read `scene.sources`. Never deployable.
+#
+# WHY IT EXISTS. Session B swept `tau_margin` against swapped conditioning and
+# got Youden's J = +0.046 -- "NO USABLE THRESHOLD" -- and this project wrote the
+# margin off as "not a detector". That inference has the same defect as the one
+# already corrected for refinement (2026-08-24): `M_i` is computed on `G`'s
+# output, `G` sits near 2 dB, and the same distortion contaminates
+# cos(s_hat, e_i) and cos(s_hat, e_j) equally. Measured on the dev sweep:
+# correct 0.43873 vs swapped 0.41965, a 0.019 gap against a 0.1 threshold. So
+# J = +0.046 is a statement about THIS CHECKPOINT, not about the formula.
+#
+# HOW TO READ IT.
+#   * clean arm SEPARATES -> the formula is sound and purely gated on `G`'s
+#     quality. It recovers when the extractor does (Q2); no gate redesign is
+#     warranted, and `gated_deflation` collapsing onto `ungated_deflation` is a
+#     symptom of the extractor rather than of the gate design.
+#   * clean arm DOES NOT separate -> the margin is broken independently of `G`
+#     and needs REPLACING, not re-tuning. That is a design task, not a budget one.
+#
+# ORACLE REGIONS ON PURPOSE (`diarizer:` is absent below). The clean arm needs
+# row i to BE source i, which anonymous diarizer clusters do not give -- the
+# probe refuses loudly rather than scoring the wrong speaker. And the question
+# is about the FORMULA, so a real diarizer would only add a confound. Note this
+# makes the `V_i` half of the report structurally 0 and therefore meaningless
+# here; `V_i` was already answered by the dev_long run and re-priced by `vi_on`.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/tune_gate.py \
+#       --config configs/phase3/experiments/phase3_gate_tune_clean_margin.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_dev_long.csv
+  n_src: 3
+  placement: chain
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 50
+  diarizer_sample_rate: 16000
+
+# Present -> the honest population uses real regions. Remove this block to get
+# the old oracle behaviour (and a meaningless V_i sweep).
+# diarizer: DELIBERATELY ABSENT -- see the header. Oracle regions.
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# What the sweep is measured AGAINST, not what it recommends.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+tune:
+  # Bracket the range Stage A actually observed (max 3.24e-4) as well as the
+  # current threshold, or the sweep cannot show where -- if anywhere -- the two
+  # populations separate. A grid that starts at 0.01 would report "no threshold
+  # rejects anything" and look like a broken fixture rather than a real floor.
+  max_mean_variance_grid: [0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
+  tau_margin_grid: [-0.2, -0.1, 0.0, 0.05, 0.1, 0.15, 0.2, 0.3]
+  min_vad_coverage_grid: [0.0, 0.25, 0.5, 0.75]
+  max_artifact_score_grid: [0.7, 0.8, 0.9, 1.0]
+  results_dir: results/phase3/experiments
+  tag: clean_margin

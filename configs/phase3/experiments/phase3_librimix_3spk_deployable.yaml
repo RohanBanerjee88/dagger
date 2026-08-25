@@ -1,0 +1,92 @@
+# Phase 3 Stage B Session 3: WHAT THE DEPLOYABLE SYSTEM DELIVERS TODAY.
+#
+# Unlike the bounds beside it, every setting here is deployable -- no ground
+# truth is read. It applies both changes Session 1 and Session 2 earned, TOGETHER,
+# against the same 50-scene corpus and the same clip50 checkpoint as the Stage A
+# baseline, so the rows pair and the total is attributable:
+#
+#   dilate_overlap_ms: [400]   # Session 1, Q3
+#       oracle-vs-real gap on `si_sdr_pooled`: -3.01 -> -1.12 dB paired, win
+#       rate 9% -> 23%. The optimum is INTERIOR; 800 ms is past the peak.
+#   max_mean_variance: 1e-4  (Session 2, Q1) -- `V_i` at its tuned threshold.
+#       Fires 156/1350 (11.6%) and costs nothing: +0.012 to +0.235 dB, never
+#       negative. The shipped 0.05 was 500x above the usable range.
+#
+# THIS RUN DELIBERATELY VARIES TWO THINGS AT ONCE, which every other config here
+# refuses to do. That is correct for this one question and wrong for any other:
+# the attribution already exists (Session 1 for dilation, Session 2 for `V_i`,
+# each varying one knob against the same baseline), so what is missing is not
+# another attribution but the DEPLOYMENT number -- "if we shipped what we know
+# today, what does a user get?". Do not read a per-knob conclusion out of it.
+#
+# Stage A's headline -3.11 dB is a 0 ms, gate-off number. Once this runs, that
+# headline should be re-reported alongside this one rather than replaced: the
+# -3.11 is what the diarizer costs, this is what it costs after mitigation.
+#
+# `refine.rounds: 0` is the reported default -- refinement is net-harmful in
+# every regime measured and its acceptance-rule axis is closed at <= +0.18 dB.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
+#       --config configs/phase3/experiments/phase3_librimix_3spk_deployable.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_test_long.csv
+  n_src: 3
+  placement: chain
+  # MUST stay < 0.5 -- see the header. Keep in sync with the --overlap passed to
+  # build_long_scene_metadata.py, which only uses it to predict scene length.
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 50
+  diarizer_sample_rate: 16000
+
+diarizer:
+  name: pyannote
+  model: pyannote/speaker-diarization-community-1
+  # Session 1, Q3: the measured operating point. Interior optimum -- 800 ms
+  # is past the peak on `si_sdr_pooled`.
+  dilate_overlap_ms: [400]
+  # `real_forced_m` DROPPED (2026-08-18). At 2-minute scenes it came out
+  # IDENTICAL to `real` -- same DER to 3 decimals, same SI-SDR to 2, +0.00 on
+  # all 300 paired rows -- because pyannote picks 3 speakers unaided at this
+  # length. It was ~25% of runtime measuring a constant. Keep it in any
+  # SHORT-scene config, where speaker counting still fails (2.04-2.07 clusters
+  # for 3 speakers).
+  # oracle + real only. `real_index_order` decomposes the V_i reordering, which
+  # this run does not ask about, and it would add 1.7 h to the session.
+  arms: [oracle, real]
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+# Untuned Phase 2 defaults. `max_mean_variance: 0.05` has still never fired:
+# across both 2026-08-16 runs `mean_variance` was nonzero in ~53% of decisions
+# but never exceeded 5.9e-4, roughly 100x below the threshold. Treat V_i as a
+# measured negative result, not a knob awaiting tuning.
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.0001   # Session 2, Q1
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+
+refine:
+  rounds: 0                  # the reported default
+
+eval:
+  results_dir: results/phase3/experiments
+  tag: deployable

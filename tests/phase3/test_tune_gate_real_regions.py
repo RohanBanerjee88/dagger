@@ -147,3 +147,55 @@ class TestWhyOracleVariancesAreUseless:
         rendered = "\n".join(lines)
         assert "NO USABLE THRESHOLD" in rendered
         assert "suggested" not in rendered
+
+
+class TestTheCleanMarginArm:
+    """Q1b (2026-08-25). `tau_margin` scored J = +0.046 and this project wrote
+    "not a detector" -- but the margin is computed on `G`'s ~2 dB output, where
+    the same distortion contaminates both cosines. That verdict is one point on
+    the EXTRACTOR axis, not a property of `M_i`. These populations substitute
+    the clean source, so the sweep bounds what the formula could ever do.
+    """
+
+    def test_both_clean_populations_are_emitted(self, three_speaker_scheduled_scene):
+        rows = _measure(three_speaker_scheduled_scene, diarizer=None)
+        for pop in (tune_gate.CLEAN_CORRECT, tune_gate.CLEAN_SWAPPED):
+            n = sum(1 for r in rows if r["population"] == pop)
+            assert n == 3, f"{pop}: expected one row per speaker, got {n}"
+
+    def test_the_clean_arm_is_not_a_copy_of_the_extracted_arm(
+        self, three_speaker_scheduled_scene
+    ):
+        """If it were, the sweep would re-measure `G`'s output under a new label
+        and answer nothing -- the vacuous-guard failure mode again."""
+        rows = _measure(three_speaker_scheduled_scene, diarizer=None)
+        def margins(pop):
+            return [r["margin"] for r in rows if r["population"] == pop]
+        assert margins(tune_gate.CLEAN_CORRECT) != margins(tune_gate.CORRECT)
+        assert margins(tune_gate.CLEAN_SWAPPED) != margins(tune_gate.SWAPPED)
+
+    def test_swapping_the_clean_source_changes_the_margin(
+        self, three_speaker_scheduled_scene
+    ):
+        """The stimulus must actually differ: clean_swapped feeds speaker i-1's
+        audio while judging against speaker i's embedding."""
+        rows = _measure(three_speaker_scheduled_scene, diarizer=None)
+        correct = [r["margin"] for r in rows if r["population"] == tune_gate.CLEAN_CORRECT]
+        swapped = [r["margin"] for r in rows if r["population"] == tune_gate.CLEAN_SWAPPED]
+        assert correct != swapped
+
+    def test_it_skips_loudly_under_cluster_labels(
+        self, three_speaker_scheduled_scene, capsys
+    ):
+        """Rows from a real diarizer are anonymous clusters, so `scene.sources[i]`
+        is not speaker i and the arm MUST refuse rather than score the wrong
+        speaker. Refusing silently would be worse than refusing loudly."""
+        rows = _measure(three_speaker_scheduled_scene, diarizer=FakeDiarizer(relabel=True))
+        assert not [r for r in rows if r["population"] == tune_gate.CLEAN_CORRECT]
+        assert "clean-margin arm SKIPPED" in capsys.readouterr().out
+
+    def test_the_report_says_so_rather_than_rendering_an_empty_table(self):
+        """An empty sweep would read as 'the margin found nothing'."""
+        source = (ROOT / "scripts" / "tune_gate.py").read_text()
+        i = source.index("Q1b -- is the margin broken")
+        assert "did not run" in source[i:i + 900]
