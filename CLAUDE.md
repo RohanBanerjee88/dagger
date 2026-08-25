@@ -42,6 +42,19 @@ error stands alone and **does not accumulate**. This is the entire point of the 
 ever see code subtracting `ŝ` from `x_O` and feeding the result back into `G` for output —
 **stop, that's the bug we exist to avoid.**
 
+**Worked example — five people talking at once, and what the two designs actually do.**
+Take one 5-speaker scene and follow the *fifth* speaker the system processes:
+
+| | deflation (the anti-pattern) | ours |
+|---|---|---|
+| what `G` is fed | `x_O − ŝ₁ − ŝ₂ − ŝ₃ − ŝ₄` — four estimates' errors baked in | `x_O`, untouched |
+| measured SI-SDR | **−6.78 dB** | **−4.97 dB** |
+
+Both numbers are from the same file, same scene, same checkpoint
+(`phase2_librimix_5spk_scratch345clip50.csv`, m=5 at depth 5, n=150 per level): a speaker with
+four prior subtractions scores **1.81 dB worse** than the same system's speaker with none. Ours has
+no such gradient to measure, because nothing is ever subtracted.
+
 ---
 
 ## 2. Facts that are mathematically settled (do not "re-derive" and break them)
@@ -50,8 +63,13 @@ These are proven in `docs/diarization_full_mathematical_theory.pdf`. Treat them 
 
 - **Solo regions are clean.** Where only speaker *i* is active, `x = s_i + n`. So a solo clip
   is a valid enrollment sample. ✔
+  *Example:* in a 2-minute 3-speaker scene each speaker gets ~45 s alone; enrollment takes the top
+  3 such clips (≥500 ms each) and averages their embeddings into `ē_i`.
 - **Copy, don't separate, on solo regions.** Running a network on already-clean audio only adds
   artifacts. Solo parts are copied straight through. ✔
+  *Example, and this one is now PRICED:* forcing `G` over already-clean audio by dilating oracle
+  masks to 800 ms drops depth 1 from **55.34 dB to 3.16 dB** — a **52 dB** penalty for separating
+  what you could have copied (`phase3_librimix_3spk_dilation_v2.csv`, oracle/`no_recursion`).
 - **Error accumulation is NOT "monotone."** An earlier draft claimed error "grows monotonically
   every step." **That's false.** The correct statement is three regimes: worst-case *linear*,
   independent-errors *√m*, realistic-correlated *linear*. Never reintroduce the "monotone" claim. ✔
@@ -59,10 +77,20 @@ These are proven in `docs/diarization_full_mathematical_theory.pdf`. Treat them 
   loss whenever noise ≠ 0. Use `‖x_O − Σ ŝ_i − n̂‖²` (a noise head) OR train on noise-free data. ✔
 - **Leakage uses a MARGIN, not raw similarity.** Raw `cos(ŝ_i, e_j)` is always positive (voices
   aren't orthogonal). Use the margin `M_i = cos(ŝ_i, e_i) − max_{j≠i} cos(ŝ_i, e_j)`. ✔
+  *Example of the formula being right and still not working:* on the dev sweep, correct
+  conditioning scored **0.43873** and deliberately swapped conditioning **0.41965** — a 0.019 gap
+  against a 0.1 threshold. The margin is sound; at `G`'s current ~2 dB the same distortion
+  contaminates both cosines, so it separates nothing. See Stage B Session B Q3.
 - **The gate can't check its own enrollment.** If enrollment is contaminated, the confidence
   score happily passes it. Guard it *before* the gate with the enrollment-variance check `V_i`. ✔
+  *Example:* under real diarization, `V_i` rejected **156 of 1,350** enrollments (11.6%) at the
+  tuned 1e-4 threshold and cost nothing — +0.012 to +0.235 dB
+  (`experiment_stage_B_run_3/vi_on/`). Under *oracle* regions it is structurally 0 and fires never.
 - **Soft masks at seams.** Hard on/off masks click and starve the network of context. Use smooth
   crossfaded windows (`w_Ei + w_Oi = 1`). ✔
+  *Example, and the sting in its tail:* `fade_ms: 5` puts a 40-sample ramp inside the depth-1
+  region, so an oracle solo copy scores 38–88 dB rather than `+inf`. Assuming otherwise produced a
+  false Phase 0 claim and a verification check that verified 0 of 288 rows (2026-08-23).
 
 **Symbol cheat-sheet** (matches the theory doc): `x` mixture · `s_i` clean speaker *i* ·
 `ŝ_i` our estimate · `n` noise · `a_i(t)` diarization activity · `E_i` solo region ·
@@ -146,11 +174,20 @@ metrics, on a handful of files, with sane numbers.
 (`tests/phase0/`). The box went unticked for a year of project time purely as bookkeeping — every
 later phase is built on this path and could not have produced its numbers if it were wrong.
 
-*The DoD criterion is met, and later runs measure it continuously.* "Copying solo regions recovers
-solo audio exactly" shows up directly as `+inf` SI-SDR rows (a perfect estimate has zero error
-energy): the Phase 3 long-scene oracle arm produced **792 `+inf` rows**, and its depth-1 mean is
-**47.62 dB** with `±inf` clipped to ±50. That is the Phase 0 guarantee being re-verified on real
+*The DoD criterion is met, and later runs measure it continuously.* **Worked example** — take one
+speaker in one 2-minute scene of `phase3_librimix_3spk_long2min.csv`: about 45 s of it is
+solo, and the pipeline copies those samples straight from the mixture. Scored on their own, those
+depth-1 samples come back at **47.62 dB** mean (oracle arm, `no_recursion`, n=150) — error energy
+about 1/58,000 of the speaker's own signal. That is the Phase 0 guarantee being re-verified on real
 data every time a later phase runs, which is stronger evidence than a one-off Phase 0 table.
+
+> **CORRECTED 2026-08-25.** This paragraph previously claimed the oracle arm produced **792 `+inf`
+> rows**. It does not: that file has **zero** `+inf` rows in the oracle arm, and 96 in total, all of
+> them in the three *real*-diarization arms. The reason is the crossfade — `fade_ms: 5` puts a ramp
+> inside the depth-1 region, so an oracle solo copy is near-exact but not bit-exact and scores
+> 38–88 dB instead of `+inf`. Read 47.62 dB as the evidence, not an `+inf` count. The same wrong
+> assumption cost a whole verification check later (Test B, 2026-08-23, which required a `+inf` row
+> that this corpus never produces and so verified 0 of 288 rows while printing PASS).
 
 *One deviation from §7 worth knowing:* `run_phase0.py` prints to stdout and writes no CSV/`.md`, so
 unlike Phases 1-3 there is no committed `results/phase0/`. The command is reproducible; its output
@@ -270,7 +307,16 @@ after the prepared-scenes list OOMed ~30 GB at 2000 scenes) produced the DoD tab
 (150 test scenes, 450 rows):
 **proposed 4.40 dB vs blind 2.05 dB mean overlap SI-SDR (+2.35 dB)**; probe: passthrough
 2.89 dB, diag +5.80 vs off-diag −6.95 (12.8 dB steering margin — grew with data: 5.6 dB at
-400 scenes). Caveats recorded honestly: (a) per-row win rate is only 50% (paired std 7.51 dB) —
+400 scenes).
+*What that means on one recording:* take a 3-speaker mixture and ask for speaker A. The blind
+baseline outputs three tracks and you must guess which is A; the proposed system is told "A" via
+`ē_A` and returns A's track directly, 2.35 dB cleaner in the overlapped part. The steering probe is
+the check that the conditioning is real rather than decorative: pointing `G` at speaker B's
+embedding while asking for A's audio makes the output **worse by 6.95 dB**, i.e. it actively
+suppresses A — a system ignoring its embedding could not do that.
+*Verified against the committed CSV 2026-08-25:* `results/phase1/phase1_librimix_3spk.csv`,
+396 scoreable rows of 450, `overlap_proposed` 4.40, `overlap_blind` 2.05, paired +2.35, win 50%,
+paired sd 7.52. Caveats recorded honestly: (a) per-row win rate is only 50% (paired std 7.51 dB) —
 the mean margin comes from magnitude asymmetry (proposed's wins are much larger than its
 losses); Phase 2's depth stratification should locate where the big wins live; (b) both
 systems are undertrained (2000 of ~34k Libri3Mix train-360 recipes; loss still descending at
@@ -1098,6 +1144,11 @@ Headline the scratch number: it has clean single-command provenance *and* it is 
 - **Ordering: 18 of 18.** `coarse_to_fine > gated_deflation > ungated_deflation` at every depth 2-5
   across all three eval sets, on *both* scratch checkpoints. clip-50 depth-2 margins, tightest
   first: 5spk 0.10 / -0.55 / -1.75; 4spk 0.83 / 0.08 / -1.02; 3spk 1.19 / 0.46 / 0.03.
+  *Concretely, on one 5-speaker scene at its 2-way-overlapped moments:* the accumulation-free
+  system hands you that speaker at **+0.10 dB**, gated deflation at **-0.55**, ungated at
+  **-1.75** -- same audio, same checkpoint, only the reconstruction strategy differs.
+  *Re-verified from the committed CSVs 2026-08-25:* 9 of 9 slices on the clip50 checkpoint
+  (`phase2_librimix_{3,4,5}spk_scratch345clip50.csv`); 18/18 counts both scratch checkpoints.
 - **Accumulation: monotone through the body of the chain, replicated** (table above).
 - **The terminal one-and-rest step replicated a third time** (+0.21 dB here, +0.26 before). Its
   residual is `x_O` minus every other estimate, which already approximates that speaker's own
@@ -1105,8 +1156,8 @@ Headline the scratch number: it has clean single-command provenance *and* it is 
   upper bound -- accumulation is monotone through the body and flattens at the endpoint. Both
   figures draw it dashed.
 - **Refinement is net-harmful under clean enrollment: negative at all 9 slices** (-0.07 to -0.41 dB;
-  the clip-10 run gave -0.15 to -0.54), with the gate healthy -- accept rate 46.2 / 34.0 / 26.8% at
-  m=3/4/5, tracking difficulty downward, no degenerate tie-shutdown. `refine.rounds: 0` stays the
+  the clip-10 run gave -0.15 to -0.54), with the gate healthy -- accept rate 46.0 / 33.8 / 26.7% at
+  m=3/4/5 (414/900, 406/1200, 401/1500 in the committed `_gate.csv`s), tracking difficulty downward, no degenerate tie-shutdown. `refine.rounds: 0` stays the
   default.
 - **`V_i` is structurally dead, again.** Zero variance rejections in 5,400 gate decisions;
   `mean_variance` is *exactly* 0.0 in 77% of them and never exceeds 4.23e-4 against a 0.05
@@ -1361,6 +1412,13 @@ Absolute SI-SDR, and the paired gap (`real - oracle`, matched on scene/speaker/d
 Win rates 9-24% with `|t|` 7.7-14.8: the real arm loses *consistently*, not through a few
 catastrophic scenes. That is the opposite of Phase 1's +2.35 dB at a 50% win rate, and it means
 the mean is describing the typical row.
+*What -3.11 dB is, on one recording:* the same speaker's overlapped seconds go from **+1.73 dB**
+(oracle masks) to **-1.38 dB** (pyannote's masks). The mechanism is in the DER split -- 24% of true
+overlap frames are called solo, and there the pipeline **copies the raw mixture** into that
+speaker's track, so all three voices arrive at full level for those moments.
+*Verified against the committed CSV 2026-08-25:* `phase3_librimix_3spk_long2min.csv` gives
+oracle 47.62/1.73, real 38.47/-1.38, paired d2 -3.11 +-0.21 at 9% win, and `_diar.csv` gives
+DER 0.113 = miss 0.105 + FA 0.000 + confusion 0.008 with overlap_recall 0.758. All exact.
 
 Diarization quality: **DER 0.113** = miss 0.105 + false alarm 0.000 + confusion 0.008,
 `overlap_recall` 0.758, zero missed speakers, zero spurious clusters.
@@ -2009,8 +2067,12 @@ prior run.
    new information is the overall column. **Budget: ~6.7 h** (25 x 2 x 4 units at 120 s/unit), so
    this does NOT fit in a session alongside B2 (~1.7 h) and `vi_on` (~5.0 h) -- give it its own,
    or drop `limit` to 15 (~4.0 h).
-5. **Set `max_mean_variance: 1e-4`** and re-run a gated comparison -- `V_i` firing for the first
-   time changes what `gated_deflation` means. Note this is now the ONLY live check in the gate,
+5. ☒ **DONE (2026-08-24). Set `max_mean_variance: 1e-4`** and re-run a gated comparison -- `V_i`
+   fired 156 times in 1,350 decisions (11.6%) and cost **nothing**: +0.012 to +0.235 dB, never
+   negative. The prediction below ("expect the gated systems to possibly get *worse*") was WRONG,
+   and the reasoning that produced it -- a partial detector's false rejections should cost quality
+   on every scene -- does not hold here, because rejecting a refinement candidate or a deflation
+   subtraction is cheap when both were near-worthless to begin with. Note this is now the ONLY live check in the gate,
    since `tau_margin` is confirmed inert, so `gated_deflation` currently differs from
    `ungated_deflation` by almost nothing.
    *Config ready (2026-08-20):* `configs/phase3/experiments/phase3_librimix_3spk_vi_on.yaml`,
@@ -2196,7 +2258,7 @@ Session B already predicted for a partial detector (45.3% detection at 7.9% fals
 
 | # | item | status |
 |---|---|---|
-| 1 | gate has never been tuned | **Answered** (Session B). `vi_on` (~5.0 h) bookable; expect a cost. |
+| 1 | gate has never been tuned | **`V_i` ANSWERED** (Session B tuned it, Session 2 priced it: FREE, +0.235 dB where it bites). The **margin is NOT** answered -- J=+0.046 is one point on the extractor axis. |
 | 2 | absolute quality | **Untouched.** Session C. Critical path. |
 | 3 | activity masks / dilation | **Mechanism answered** (91% recovery). Operating point was blocked on a defective metric; the metric is now fixed but **the sweep must be re-run to read it**. |
 | 4 | refinement ceiling | **Unknown.** Re-run queued, ~1.7 h, unaffected by any of this. |
@@ -2346,7 +2408,7 @@ permissive gate. Same shape as Test B: an assertion that cannot fail is not a pa
 
 | # | question | state | closes with |
 |---|---|---|---|
-| 1 | confidence gate | **Answered.** `V_i` J=+0.373 @1e-4; margin J=+0.046, not a detector | `vi_on`, 5.0 h -- expect a cost |
+| 1 | confidence gate | **`V_i` answered** (J=+0.373 @1e-4; Session 2: costs nothing). Margin J=+0.046 -- but measured at ~2 dB `G`, so NOT established as a property of the formula | margin-on-clean-audio probe |
 | 2 | absolute quality | **Untouched.** oracle d2 = 1.73 dB; ~13% of Phase 1's per-depth exposure | Session C retrain |
 | 3 | solo/overlap masks | **Mechanism answered** (91% recovered @800 ms); operating point open, now unblocked -- *ANSWERED 2026-08-24: 400 ms, see Session 1* | `dilation_v2`, 6.7 h, read `si_sdr_pooled` |
 | 4 | refinement window | **NEITHER END KNOWN** -- see below | `refine_ceiling` 1.7 h + `refine_oracle_audio` 1.7 h |
@@ -2394,6 +2456,13 @@ each split `numbers_csv/` + `numbers_md_docs/` per §7. Checkpoint unchanged (cl
 
 **63% of the oracle-vs-real gap recovered** (-3.01 -> -1.12 dB) with no retraining.
 
+*On one recording:* pyannote misses ~24% of the overlap frames in a 2-minute scene -- mostly brief
+incursions at the edges of a turn. In those moments the pipeline believes the speaker is alone and
+**copies the raw mixture into their track**, so you hear all three people at full volume. Widening
+the derived overlap mask by 400 ms on each side catches nearly all of them. Push to 800 ms and it
+reverses: `G` now runs over genuinely solo audio, and the depth-1 copy falls 41.81 -> 10.27 dB for
+less depth-2 gain than that costs.
+
 *Why this supersedes run 1's read.* Run 1 had no pooled metric and its per-depth story pointed at
 800 ms; on `si_sdr_pooled` 800 ms is clearly past the peak. The optimum is **interior**, which is
 the first time an un-stratified number here has produced one rather than a monotone -- a metric
@@ -2435,7 +2504,12 @@ NEGATIVE, which is what exposed the mis-specified objective (it scored the whole
 table reported depth 2). The 2026-08-20 fix is confirmed working on real data.
 
 **But the magnitude is the result.** +0.18 dB is the ABSOLUTE MAXIMUM any acceptance rule could
-deliver on this extractor, against the deployable gate's measured **-0.5 dB**. And the gate is
+deliver on this extractor, against the deployable gate's measured **-0.5 dB**.
+
+*On one recording:* refinement re-listens to that speaker's ~16 s of extracted overlap, builds a
+fresh voiceprint from it, and re-extracts. Give it a rule allowed to peek at the clean source and
+commit only genuine improvements, and the speaker's track gets **0.18 dB** better. Play the two
+files: you cannot tell them apart. That is the ceiling, not the achievement. And the gate is
 barely missing that headroom: `ceiling_accept_gate_would_reject` fired **4 of 150** (oracle) and
 **6 of 150** (real) -- about 4%.
 
@@ -2460,6 +2534,11 @@ Median `level_error_db`, `no_recursion` vs the deflation systems:
 | oracle `coarse_to_fine` | 8.20 | 8.57 | 8.86 | 9.70 |
 
 * **Replicates.** 8.78 dB here against 8.88 on the 3-scene probe.
+* *What it sounds like on one recording:* for ~45 s the speaker plays at the correct volume,
+  because those samples are a verbatim copy of the mixture. Then the overlap starts and the track
+  jumps to **2.8x amplitude -- a +9 dB step** -- and drops back when it ends. It sounds like they
+  start shouting the instant someone talks over them, twice a minute. For a deflation system the
+  step is 4.8x.
 * **The deflation gap WIDENED**: +4.88 dB over `no_recursion` at 25 scenes, against +2.60 dB at 3
   scenes. Stronger support for the over-subtraction mechanism -- an estimate 2.86x too loud
   over-subtracts into the residual and the error compounds down the chain.
@@ -2482,14 +2561,139 @@ Median `level_error_db`, `no_recursion` vs the deflation systems:
 
 | # | question | state | closes with |
 |---|---|---|---|
-| 1 | confidence gate | **Answered**; deployed cost unpriced | `vi_on`, 5.0 h -- expect a cost |
+| 1 | confidence gate | **`V_i` answered + priced (Session 2: free).** Margin unknown -- one point on the extractor axis | margin-on-clean-audio probe |
 | 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
 | 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap recovered** | make it the default; re-report Stage A |
 | 4 | refinement window | **Rule axis CLOSED (<= +0.18 dB).** Extractor axis open | `refine_oracle_audio`, 1.7 h |
 | 5 | output level | **Confirmed at scale**, worse for deflation, grows with dilation | `rescale`, 1.7 h |
 
 **Session 2 (~8.9 h), all configs already committed:** `refine_oracle_audio` (1.7 h) + `rescale`
-(1.7 h) + `vi_on` (5.0 h). After it, only Q2 remains, and it is the one that gates Q4 and Q1.
+(1.7 h) + `vi_on` (5.0 h). *Outcome (2026-08-24): only `vi_on` was valid -- a wiring defect voided
+the other two. See "STAGE B -- SESSION 2".*
+
+
+---
+
+**STAGE B -- SESSION 2 (2026-08-24): TWO OF THE THREE RUNS ARE VOID. A wiring defect in
+`run_phase3.py` meant `refine.oracle_audio` and `extractor.rescale_to_mixture` were read from the
+config, validated, warned about -- and never passed to the scorer. Q1 is answered and the answer
+REVERSES the prediction: switching `V_i` on costs nothing and helps slightly. Q4b and Q5 remain
+open.**
+
+Artifacts: `results/phase3/experiments/experiment_stage_B_run_3/{refine_oracle_audio,rescale,vi_on}/`.
+
+#### The defect, and why nothing caught it
+
+`main()` computed both flags and forwarded neither:
+
+```python
+score_scene_all_arms(
+    ..., refine_oracle_ceiling=refine_oracle_ceiling,   # forwarded
+    dilation_failures=dilation_failures,                # <- the other two never appear
+)
+```
+
+Both defaulted to `False`. Proven, not inferred: the `refine_oracle_audio` run is **bit-identical
+on all 300 rows**, `coarse_to_fine` included, to Session 1's plain `dilation_v2` at 0 ms. The
+`rescale` run is identical for every system except `coarse_to_fine`, and that differs only because
+its config sets `refine.rounds: 0`.
+
+*Everything around the bug was correct*, which is why it survived: the configs were right, the
+`match_level_to_mixture` and `candidate_audio` code was right and unit-tested, and `score_scene`
+accepted both arguments properly. Only the single call site dropped them. **Every existing test
+drove `score_scene` directly**, so the config-to-call wiring was covered nowhere -- the same shape
+as Test B's vacuous guard: a plausible result, and nothing failing.
+
+Fixed, plus `tests/phase3/test_run_phase3_arms.py::TestConfigFlagsReachScoreScene`, which asserts
+that every flag `main()` reads is also forwarded. Verified to FAIL on the reverted code and pass on
+the fix (suite 491 passed / 1 skipped, up from 487).
+
+**Cost: ~3.4 h of GPU that produced no new information.** Re-run both from the same configs; the
+configs did not change, the code did.
+
+#### Q1 -- ANSWERED, and it reverses the prediction: `V_i` is free
+
+First run in the project's history with a live `V_i`. 1,350 gate decisions, 50 scenes, 3 arms:
+
+| reason | n | share |
+|---|---|---|
+| accepted | 962 | 71.3% |
+| margin | 232 | 17.2% |
+| **enrollment_variance** | **156** | **11.6%** |
+
+`mean_variance` median 4.49e-05, max 3.24e-04, and 156/1350 above the tuned 1e-4 threshold. **This
+is the first time `enrollment_variance` has ever appeared as a rejection reason.**
+
+*What it catches, on one recording:* enrollment picks 3 "solo" clips for speaker A to build their
+voiceprint. If pyannote's solo region for A actually has a second of B bleeding in, one of those
+clips is really A+B -- and the resulting voiceprint is a blend, so `G` then extracts a blend for
+A's entire overlap section. `V_i` is the disagreement *between* A's own clips: high variance means
+one of them is not the same person as the others. It cannot see this under oracle diarization,
+where a speaker's solo region is one contiguous run and yields exactly one clip -- variance over a
+single sample is 0 by definition, which is why this took three phases to become measurable.
+
+Paired against the Stage A baseline, depth 2, n=150 per cell:
+
+| arm | `gated_deflation` | `coarse_to_fine` |
+|---|---|---|
+| oracle | +0.000 | +0.000 |
+| real | +0.012 (\|t\| 0.4) | +0.057 (\|t\| 2.3) |
+| real_index_order | **+0.235 (\|t\| 3.6)** | +0.057 (\|t\| 2.3) |
+
+**Switching `V_i` on is not a cost.** It is neutral-to-slightly-positive, and the one clearly
+non-chance effect (+0.235 dB, |t| 3.6) is in the arm where deflation order is *not* already sorted
+by `V_i` -- which is the arm where rejecting a contaminated enrollment actually changes something.
+
+*The controls confirm the plumbing:* `no_recursion` and `ungated_deflation` are **exactly +0.000**
+in all three arms. Neither runs the gate, so a threshold change cannot reach them. And the `oracle`
+arm is +0.000 for every system, because `V_i` is structurally 0 under oracle regions -- the same
+fact that made this untunable for three phases.
+
+**Action: `max_mean_variance: 1e-4` becomes the default.** The earlier prediction in this file --
+"expect it to measure a cost rather than a win", reasoned from the 7.9% false-rejection rate -- was
+wrong. The false rejections are real (the 11.6% firing rate matches the dev sweep almost exactly)
+but they cost nothing measurable, because rejecting a *refinement* candidate or a deflation
+subtraction is cheap when both were near-worthless anyway.
+
+#### Q1's other half is NOT answered, and this file has been overstating it
+
+`V_i` is settled. **`tau_margin` is not**, and the distinction matters:
+
+* **`V_i` is not gated on `G`.** It embeds enrollment clips taken from the *mixture*, never `G`'s
+  output. Its J = +0.373 is durable across any change to the extractor.
+* **The margin is.** Its J = +0.046 was measured with `G` at ~2 dB, where the same distortion
+  contaminates both cosines and the margin collapses whatever the extraction. That is one point on
+  the extractor axis -- exactly the error already corrected for refinement (Q4). "The margin is not
+  a detector" is only established AT THIS CHECKPOINT.
+
+*The cheap way to settle it*, mirroring `refine_oracle_audio`: compute the margin on the **clean
+source** instead of `G`'s output, correct vs. swapped conditioning. Separates -> the formula is
+sound and purely gated on `G`, so it recovers when Q2 does. Fails to separate -> the margin is
+broken as a formula and needs replacing. No training, one `tune_gate.py` variant.
+
+#### Q4b and Q5 -- still open, both void
+
+Nothing was measured. The re-run is the same two commands.
+
+*What Q5's re-run should show, so it can be read rather than eyeballed:* `level_error_db` falling
+from ~8.9 dB toward 0; `si_sdr_pooled` **barely moving** (it is gain-invariant by construction, so
+a large shift means the rescale is changing SHAPE, which it must not); per-depth `si_sdr` unchanged
+(scale-invariant); and the deflation systems gaining most, if over-subtraction is the mechanism.
+
+Note the correction is the least-squares (MMSE) scalar, so it under-corrects slightly rather than
+over-corrects -- expect `level_error_db` small but nonzero, not 0. And with the measured `alpha_2`
+reaching 19.5x on some speakers, `MAX_RESCALE = 8.0` will decline to act on a few rows rather than
+rescale on a noisy projection.
+
+#### The five questions after Session 2
+
+| # | question | state | closes with |
+|---|---|---|---|
+| 1 | confidence gate | **`V_i` ANSWERED: free, +0.235 dB where it bites. Default it to 1e-4.** Margin still unknown -- one point on the extractor axis | margin-on-clean-audio probe |
+| 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
+| 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap** | make it the default |
+| 4 | refinement window | Rule axis CLOSED (<= +0.18 dB). **Extractor axis VOID, not measured** | re-run `refine_oracle_audio` |
+| 5 | output level | Measured at 8.78 dB; **the fix is VOID, not measured** | re-run `rescale` |
 
 ### ☐ Phase 4 — Real corpora + full ablation
 
@@ -2599,6 +2803,14 @@ for the proposed system.
     appear as a bad number — it appears as no number at all**, and surfaces only as a disagreement
     between two metrics with *different* scale behaviour. Keep `level_error_db` reported for exactly
     that reason, and be suspicious of any quantity no committed metric could contradict.
+  - **Every number in this file must be re-derivable from a committed CSV.** Audited 2026-08-25
+    against `results/`: Phase 1's 4.40/2.05/+2.35, Phase 2's 18/18 ordering, its -4.97→-6.78
+    accumulation curve, its +0.21 terminal uptick, its 0-variance-rejections-in-5400, and Stage A's
+    DER 0.113 / recall 0.758 / -3.11 dB all reproduce **exactly**. Two did not: the Phase 0
+    "792 `+inf` rows" claim (actual: **0** in the oracle arm) and the refinement accept rates
+    (46.2/34.0/26.8 → **46.0/33.8/26.7**). Both are corrected in place. The lesson is the first
+    one's shape: it was a *plausible* number nobody could have checked without opening the file,
+    and it then propagated into a test guard that silently verified nothing.
   - **A guard that verifies zero rows is not a passing guard.** Test B (2026-08-23) required a
     `+inf` depth row that this corpus never produces, skipped all 288 rows, and printed PASS while
     the property it checked was violated in 271 of them. **Always print the count you verified, and

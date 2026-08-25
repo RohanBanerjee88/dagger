@@ -962,6 +962,8 @@ def main() -> int:
                 arm_failures=arm_failures,
                 dilate_ms_values=dilate_ms_values,
                 refine_oracle_ceiling=refine_oracle_ceiling,
+                refine_oracle_audio=refine_oracle_audio,
+                rescale_to_mixture=rescale_to_mixture,
                 dilation_failures=dilation_failures,
             )
         except NoSoloRegionError as exc:

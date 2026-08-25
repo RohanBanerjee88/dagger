@@ -207,3 +207,43 @@ class TestMandatoryOracleArm:
         monkeypatch.setattr(sys, "argv", ["run_phase3.py", "--config", str(path)])
         with pytest.raises(SystemExit, match="oracle"):
             run_phase3.main()
+
+
+class TestConfigFlagsReachScoreScene:
+    """The 2026-08-24 defect: `main()` read `refine.oracle_audio` and
+    `extractor.rescale_to_mixture` from the config, validated them, printed
+    warnings about them -- and never passed them to `score_scene_all_arms`. Both
+    silently defaulted to False, so two Kaggle runs (~3.4 h) produced output
+    bit-identical to a plain run and were read as results.
+
+    Nothing failed. The configs were right, the code they gate was right and
+    unit-tested, `score_scene` accepted the arguments correctly -- only the one
+    call site in `main()` dropped them. Every existing test drove `score_scene`
+    directly, so the wiring between config and call was covered nowhere.
+
+    These tests assert on the SOURCE rather than by running `main()`, which
+    needs a corpus, a GPU and pyannote. Crude, but it is the property that broke:
+    a flag that main() computes must also be forwarded.
+    """
+
+    def _main_call_kwargs(self) -> str:
+        import re
+        src = (ROOT / "scripts" / "run_phase3.py").read_text()
+        i = src.index("def main(")
+        j = src.index("score_scene_all_arms(", i)
+        return src[j:src.index(")", src.index("dilation_failures", j))]
+
+    @pytest.mark.parametrize(
+        "flag", ["refine_oracle_ceiling", "refine_oracle_audio", "rescale_to_mixture"]
+    )
+    def test_every_flag_main_reads_is_also_forwarded(self, flag):
+        assert f"{flag}={flag}" in self._main_call_kwargs(), (
+            f"main() computes `{flag}` but does not pass it to "
+            "score_scene_all_arms -- the run would silently use the default"
+        )
+
+    def test_score_scene_all_arms_accepts_them(self):
+        import inspect
+        sig = inspect.signature(run_phase3.score_scene_all_arms).parameters
+        for flag in ("refine_oracle_ceiling", "refine_oracle_audio", "rescale_to_mixture"):
+            assert flag in sig, f"score_scene_all_arms lost the {flag} parameter"
