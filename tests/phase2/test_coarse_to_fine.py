@@ -257,3 +257,38 @@ class TestModuleIsolation:
         assert not any("dagger.reconstruct.deflation" in mod for mod in imported_modules)
         assert "TrackedSignal" not in imported_names
         assert "Provenance" not in imported_names
+
+
+class TestTheReportedDefaultAndTheCodeDefaultAgree:
+    """CLAUDE.md has recorded `refine.rounds: 0` as the default since Phase 2's
+    close-out; the code said `2` until 2026-08-25.
+
+    The mismatch moved no committed number -- every config with a `refine:` block
+    sets `rounds` explicitly -- but it meant any NEW config omitting the key
+    silently switched on a stage now measured at **+0.002 dB** even with a
+    perfect candidate and an open gate (Stage B Session 3, Q4b), and bounded at
+    **<= +0.18 dB** on the acceptance-rule axis (Session 1).
+
+    Pinned here because nothing else would catch the drift recurring: the two
+    defaults lived in different files from each other and from the prose that
+    described them, and the suite stayed green throughout.
+    """
+
+    def test_refine_embeddings_defaults_to_no_rounds(self):
+        assert inspect.signature(refine_embeddings).parameters["rounds"].default == 0
+
+    @pytest.mark.parametrize("script", ["run_phase2.py", "run_phase3.py"])
+    def test_the_entrypoints_default_to_no_rounds(self, script):
+        source = (Path(__file__).resolve().parents[2] / "scripts" / script).read_text()
+        assert '"rounds", 2' not in source, (
+            f"{script} still falls back to 2 rounds when a config omits "
+            "`refine.rounds`; the reported default is 0"
+        )
+        assert '"rounds", 0' in source
+
+    def test_this_does_not_disable_refinement_for_configs_that_ask_for_it(self):
+        """The Phase 2 DoD CSVs were produced with `rounds: 2` (every
+        `coarse_to_fine` row records it), so reproduction depends on an explicit
+        setting still working. This guards the default, not the feature."""
+        import dagger.refine.coarse_to_fine as mod
+        assert "rounds" in inspect.signature(mod.refine_embeddings).parameters

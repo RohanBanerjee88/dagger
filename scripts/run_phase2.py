@@ -362,7 +362,7 @@ def main() -> int:
     extractor_cfg = dict(cfg.get("extractor", {}))
     checkpoint_path = extractor_cfg.pop("checkpoint", None)
     gate_cfg = cfg.get("gate", {})
-    refine_rounds = int(cfg.get("refine", {}).get("rounds", 2))
+    refine_rounds = int(cfg.get("refine", {}).get("rounds", 0))
 
     encoder = TitaNetEncoder(device=device)
     extractor = TFGridNetCrossAttnExtractor(checkpoint_path=checkpoint_path, device=device, **extractor_cfg)

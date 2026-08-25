@@ -889,7 +889,7 @@ def main() -> int:
     # Same rule as the arm check above: refuse an incoherent refinement config
     # here, not after the corpus has mounted and the checkpoint has loaded.
     refine_cfg = cfg.get("refine", {})
-    refine_rounds = int(refine_cfg.get("rounds", 2))
+    refine_rounds = int(refine_cfg.get("rounds", 0))
     refine_oracle_ceiling = bool(refine_cfg.get("oracle_ceiling", False))
     refine_oracle_audio = bool(refine_cfg.get("oracle_audio", False))
     rescale_to_mixture = bool(cfg.get("extractor", {}).get("rescale_to_mixture", False))

@@ -80,7 +80,10 @@ These are proven in `docs/diarization_full_mathematical_theory.pdf`. Treat them 
   *Example of the formula being right and still not working:* on the dev sweep, correct
   conditioning scored **0.43873** and deliberately swapped conditioning **0.41965** — a 0.019 gap
   against a 0.1 threshold. The margin is sound; at `G`'s current ~2 dB the same distortion
-  contaminates both cosines, so it separates nothing. See Stage B Session B Q3.
+  contaminates both cosines, so it separates nothing.
+  *Now MEASURED rather than argued (2026-08-25):* on the **clean source** the same contrast gives
+  **0.55680 vs 0.31409** — a 0.243 gap, J = **+0.453**, 0.0% false rejection up to τ=0.2. So the
+  formula discriminates fine; only `G`'s output starves it. See Stage B Session 3 Q1b.
 - **The gate can't check its own enrollment.** If enrollment is contaminated, the confidence
   score happily passes it. Guard it *before* the gate with the enrollment-variance check `V_i`. ✔
   *Example:* under real diarization, `V_i` rejected **156 of 1,350** enrollments (11.6%) at the
@@ -781,6 +784,12 @@ untested regime is *contaminated* enrollment, where the baseline is actually bro
 Phase 3, and it is why `V_i` exists and has never once fired. Also untested: a variance-weighted
 blend instead of the fixed `0.5/0.5`, which would down-weight a noisy candidate automatically and
 needs no benefit test. A negative result on one update rule is not one on the family.
+> **CLOSED 2026-08-25.** The variance-weighted blend is dead, and by mechanism rather than by
+> another run. Refinement's premise was that the extracted overlap is "a purer sample than the raw
+> mixture" -- but enrollment never uses the raw mixture, it uses the SOLO region, which is already
+> clean (§2, first settled fact). So the blend averages two clean embeddings of the *same speaker*.
+> Confirmed: with the candidate embedded from the clean source, refinement scores **+0.002 dB**
+> (Session 3, Q4b). The argument is weight-independent, so no reweighting of those two terms helps.
 
 *New finding -- the confidence gate is not an accumulation detector.* On the heterogeneous corpus
 (4 s enrollment) `gated_deflation` accepted **98.4%** and collapsed onto `ungated_deflation`
@@ -1166,12 +1175,20 @@ Headline the scratch number: it has clean single-command provenance *and* it is 
   > **PARTLY CORRECTED (2026-08-20):** structurally 0 under *oracle* regions, yes -- but not dead.
   > At a 1e-4 threshold on real diarization it scores J = +0.373; `0.05` is 500x too high. And the
   > 3,138 `margin` rejections counted here are now suspect from the other direction: the margin
-  > scored J = +0.046 ("no usable threshold") on the dev sweep, and the conditioning probe has
-  > since CONFIRMED that verdict -- clip50 steers at 9.41 dB, so the fault fixture was valid and
-  > the margin genuinely fails to separate wrong-speaker output. **Treat these 3,138 rejections as
-  > close to noise**, and with them the Phase 2 gated-vs-ungated comparison: `gated_deflation`
-  > differs from `ungated_deflation` only where the margin fires, and the margin is not detecting
-  > what it is supposed to detect. See Stage B Session B Q3 and its follow-up.
+  > scored J = +0.046 ("no usable threshold") on the dev sweep, and the conditioning probe
+  > confirmed the fixture was valid -- clip50 steers at 9.41 dB, so the swapped population really
+  > was different audio. **Treat these 3,138 rejections as close to noise**, and with them the
+  > Phase 2 gated-vs-ungated comparison: `gated_deflation` differs from `ungated_deflation` only
+  > where the margin fires, and on THIS checkpoint the margin is not detecting what it is supposed
+  > to detect. See Stage B Session B Q3 and its follow-up.
+  >
+  > **REFINED AGAIN (2026-08-25).** An earlier version of this note said the margin "genuinely
+  > fails to separate wrong-speaker output", i.e. blamed the FORMULA. That is now measured false:
+  > on the clean source the same contrast gives 0.55680 vs 0.31409, J = **+0.453**. The formula
+  > discriminates; `G`'s ~2 dB output starves it. The practical reading of these 3,138 rejections
+  > is unchanged -- they are still close to noise *at this checkpoint* -- but the cause is the
+  > extractor, so the Phase 2 gated-vs-ungated comparison is expected to become meaningful again
+  > once Q2 lifts. See Stage B Session 3 Q1b.
 
 #### Absolute quality: a training-budget fact, and a Phase 4 input
 
@@ -1618,6 +1635,12 @@ a noisy candidate down-weights itself); embed only the cleanest part of the extr
 extracted audio would embed near-cleanly and refinement's premise would finally hold. Current read:
 refinement is probably gated on extractor quality rather than on the update rule, but the ceiling
 run is what turns that from opinion into evidence.
+> **ALL THREE LEVERS ARE NOW CLOSED (2026-08-25).** The ceiling came in positive but tiny
+> (+0.14 / +0.18 dB, Session 1), bounding the whole acceptance-rule family. The third lever --
+> "better `G` would make the premise hold" -- was tested directly by embedding the candidate from
+> the CLEAN SOURCE, i.e. the perfect-extractor limit, and scored **+0.002 dB** (Session 3, Q4b).
+> The first two are weight/segment choices over two already-clean embeddings of the same speaker,
+> so the same mechanism covers them. `refine.rounds: 0` is final, and the code default now matches.
 
 #### STAGE B -- full work list (4/5/6 done; 1/3 RUN; 2 run but VOID, re-run queued; 7/8/9 open)
 
@@ -1635,7 +1658,8 @@ design already decided by measurement rather than by guess.
    queued (~1.7 h)**. The headroom question is currently *unknown*, not answered. See Session B Q2.
 3. ☒ **DONE. `tune_gate.py` on a long-scene dev split** (item 1) -- `V_i` scores **J = +0.373 at a
    1e-4 threshold**, overturning four "structurally dead" conclusions; the shipped `0.05` is 500x
-   too high. `tau_margin` scores J = +0.046 ("no usable threshold"), and the conditioning probe
+   too high. `tau_margin` scores J = +0.046 ("no usable threshold") ON `G`'S OUTPUT -- but **+0.453
+   on clean audio** (Session 3 Q1b), so the formula is sound and merely starved; the conditioning probe
    CONFIRMED the fixture was valid (clip50 steers at 9.41 dB), so the margin is genuinely not a
    detector. Only `max_mean_variance: 1e-4` is worth freezing; `tau_margin` needs replacing rather
    than re-tuning, and cannot be evaluated on this checkpoint anyway. See Session B Q3.
@@ -1992,7 +2016,14 @@ finding. `scripts/probe_phase1_conditioning.py` on **clip50, 15 scenes of the sa
 `VERDICT: conditioning STEERS`. Relative output difference between two speaker embeddings is
 **0.9816** (working reference ~0.86, collapsed ~0.05), and at 2.45 dB against `x_O` the output is
 nothing like a scaled copy of the mixture. **So the swapped population was genuinely different
-audio, and `tau_margin`'s J = +0.046 stands: it is not a detector.**
+audio, and `tau_margin`'s J = +0.046 stands as a measurement of this checkpoint.**
+
+> **SCOPE CORRECTED (2026-08-25).** This sentence originally ended "it is not a detector", which
+> reads as a verdict on `M_i` itself. It is not one. The probe establishes that the *fixture* was
+> valid, not that the *formula* is broken -- those are different claims, and conflating them is the
+> same error this file made about refinement. Measured since: on the clean source the margin scores
+> J = **+0.453** against J = +0.046 on `G`'s output. The formula is sound and purely starved by the
+> extractor. See Stage B Session 3 Q1b.
 
 **One sharp reading of that table: suppression is IDENTICAL (-6.95 vs -7.05); the entire 3.3 dB
 shortfall is in the diagonal.** clip50 learned to reject the wrong speaker but not to reconstruct
@@ -2408,7 +2439,7 @@ permissive gate. Same shape as Test B: an assertion that cannot fail is not a pa
 
 | # | question | state | closes with |
 |---|---|---|---|
-| 1 | confidence gate | **`V_i` answered** (J=+0.373 @1e-4; Session 2: costs nothing). Margin J=+0.046 -- but measured at ~2 dB `G`, so NOT established as a property of the formula | margin-on-clean-audio probe |
+| 1 | confidence gate | **ANSWERED, both halves.** `V_i` J=+0.373 @1e-4, costs nothing. Margin: J=+0.046 on `G`'s output but **+0.453 on clean audio** -- the formula is sound, it is starved by `G` | nothing; it recovers with Q2 |
 | 2 | absolute quality | **Untouched.** oracle d2 = 1.73 dB; ~13% of Phase 1's per-depth exposure | Session C retrain |
 | 3 | solo/overlap masks | **Mechanism answered** (91% recovered @800 ms); operating point open, now unblocked -- *ANSWERED 2026-08-24: 400 ms, see Session 1* | `dilation_v2`, 6.7 h, read `si_sdr_pooled` |
 | 4 | refinement window | **NEITHER END KNOWN** -- see below | `refine_ceiling` 1.7 h + `refine_oracle_audio` 1.7 h |
@@ -2561,7 +2592,7 @@ Median `level_error_db`, `no_recursion` vs the deflation systems:
 
 | # | question | state | closes with |
 |---|---|---|---|
-| 1 | confidence gate | **`V_i` answered + priced (Session 2: free).** Margin unknown -- one point on the extractor axis | margin-on-clean-audio probe |
+| 1 | confidence gate | **ANSWERED, both halves** (Session 3). `V_i` free; margin sound but starved -- +0.453 J on clean audio vs +0.046 on `G`'s | nothing; folds into Q2 |
 | 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
 | 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap recovered** | make it the default; re-report Stage A |
 | 4 | refinement window | **Rule axis CLOSED (<= +0.18 dB).** Extractor axis open | `refine_oracle_audio`, 1.7 h |
@@ -2689,11 +2720,62 @@ rescale on a noisy projection.
 
 | # | question | state | closes with |
 |---|---|---|---|
-| 1 | confidence gate | **`V_i` ANSWERED: free, +0.235 dB where it bites. Default it to 1e-4.** Margin still unknown -- one point on the extractor axis | margin-on-clean-audio probe |
+| 1 | confidence gate | **ANSWERED, both halves.** `V_i` free, +0.235 dB where it bites -- default 1e-4. Margin sound but starved by `G`: J = +0.453 clean vs +0.046 extracted | nothing; folds into Q2 |
 | 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
 | 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap** | make it the default |
 | 4 | refinement window | Rule axis CLOSED (<= +0.18 dB). **Extractor axis VOID, not measured** | re-run `refine_oracle_audio` |
 | 5 | output level | Measured at 8.78 dB; **the fix is VOID, not measured** | re-run `rescale` |
+
+
+---
+
+**STAGE B -- SESSION 3, Q1b (2026-08-25): THE MARGIN FORMULA IS SOUND. It was starved by `G`, not
+broken -- so no gate redesign is warranted, and Q1's second half folds into Q2.**
+
+First run of the clean-margin probe (`configs/phase3/experiments/phase3_gate_tune_clean_margin.yaml`,
+50 dev-clean long scenes, oracle regions, n=150 per population). Artifacts in
+`results/phase3/experiments/experiment_stage_B_run_4/`.
+
+| population pair | median gap | best Youden's J |
+|---|---|---|
+| extracted -- `correct` vs `swapped` (Session B) | 0.43873 vs 0.41965 = **0.019** | **+0.046** |
+| clean source -- `clean_correct` vs `clean_swapped` | 0.55680 vs 0.31409 = **0.243** | **+0.453** at tau=0.3 |
+
+False rejection is **0.0%** all the way to tau=0.2. The gap is **13x wider** on clean audio and J is
+**10x higher**.
+
+*On one recording:* hand the margin A's clean 16 s of overlap and B's clean 16 s, both judged
+against A's voiceprint. It separates them cleanly. Hand it `G`'s versions of the same two clips and
+it cannot tell them apart -- at ~2 dB both outputs are mostly the same distortion, and that
+distortion contaminates `cos(s_hat, e_A)` and `cos(s_hat, e_B)` equally.
+
+#### What this settles, and what it corrects
+
+`tau_margin`'s "NO USABLE THRESHOLD" verdict was **a statement about this checkpoint, not about
+`M_i`**. This file recorded it as a property of the formula in several places, which was the same
+error already corrected for refinement (2026-08-24): measuring one point on the extractor axis and
+reading it as a property of the design.
+
+Three standing observations now have one explanation rather than three:
+
+* `tau_margin` scoring J = +0.046 (Session B),
+* `gated_deflation` collapsing onto `ungated_deflation` at 98-99% accept (Phase 2, Stage A),
+* the refinement gate accepting 78 and 63 candidates the ground truth called worse (Session 1).
+
+All three are the same margin, computed on the same ~2 dB output. **They recover together when `G`
+does.** That is a claim about the training budget (Q2), and it means a gate redesign evaluated on
+this checkpoint would have been measuring the extractor either way.
+
+#### The `V_i` contrast is the control, and it holds
+
+`V_i` embeds enrollment clips taken from the *mixture*, never `G`'s output -- so it is the one check
+not gated on extractor quality, and it is the one check that works today (J = +0.373, and Session 2
+priced it at zero cost). The clean-margin result completes the picture the unifying mechanism
+predicted: everything that embeds `G`'s output is starved; the one thing that does not, works.
+
+**Do not re-tune `tau_margin` on this checkpoint.** The clean sweep's suggested 0.3 is the value for
+a *perfect* extractor; on today's output the same threshold rejects almost everything. Re-run this
+probe after Session C and tune then.
 
 ### ☐ Phase 4 — Real corpora + full ablation
 
@@ -2840,10 +2922,13 @@ conclusions. (1) **Overlap dilation recovers 91% of the oracle-vs-real gap at de
 (-2.98 → **-0.28 dB**, 52% win rate against oracle diarization) with no retraining — and the oracle
 arm priced §2's "copy, don't separate" at **43.9 dB** for the first time. (2) **`V_i` works**:
 J = +0.373 at a **1e-4** threshold, so four prior "structurally dead" conclusions were a threshold
-error — the shipped `0.05` sits 500× above the usable range. (3) **`tau_margin` is NOT a detector**
-(J = +0.046), and the conditioning probe confirmed that verdict rather than excusing it: clip50
-steers at 9.41 dB, so the fault fixture was valid. Phase 2's gated-vs-ungated comparison is
-weakened accordingly. (4) The **refinement ceiling was mis-specified** — it scored the whole
+error — the shipped `0.05` sits 500× above the usable range. (3) **`tau_margin` does not
+discriminate on `G`'s output** (J = +0.046), and the conditioning probe showed the fault fixture was
+valid: clip50 steers at 9.41 dB, so the swapped population really was different audio. Phase 2's
+gated-vs-ungated comparison is weakened accordingly. *[Scope corrected 2026-08-25: this footer
+originally read "`tau_margin` is NOT a detector", a verdict on the formula. Session 3's clean-margin
+probe measured J = **+0.453** on clean audio, so the formula is sound and only starved by the
+extractor — the weakening of Phase 2's comparison stands at this checkpoint, its cause does not.]* (4) The **refinement ceiling was mis-specified** — it scored the whole
 waveform while the table reported depth 2 — so its number is void and the headroom question is
 *unknown*; fixed and queued for re-run. The probe also produced the phase's most useful synthesis:
 **every check that embeds `G`'s output is gated on `G`'s quality**, which explains the dead margin,

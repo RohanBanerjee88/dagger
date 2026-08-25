@@ -78,7 +78,7 @@ def refine_embeddings(
     encoder: SpeakerEncoder,
     sample_rate: int,
     *,
-    rounds: int = 2,
+    rounds: int = 0,
     fade: int = 0,
     min_clip_ms: float = 50.0,
     tau_margin: float,
@@ -92,9 +92,33 @@ def refine_embeddings(
 
     Each round: reconstruct every speaker with the current embeddings (via the
     unmodified, guarded ``reconstruct_all``), then for each speaker take the
-    longest contiguous overlap-region run of their *own* reconstruction (a
-    purer sample of that speaker than the raw mixture, now that extraction has
-    separated them out) and re-embed it. The candidate embedding is a running
+    longest contiguous overlap-region run of their *own* reconstruction and
+    re-embed it.
+
+    **The premise this was built on is WRONG, and that is now measured.** The
+    original justification was that the extracted overlap is "a purer sample of
+    that speaker than the raw mixture". But enrollment never uses the raw
+    mixture: :func:`dagger.enroll.topk.enroll_speaker` draws its clips from the
+    SOLO region, where ``x = s_i + n`` (CLAUDE.md §2, first settled fact). So
+    ``ē_i`` is already a clean-audio embedding, and the blend below averages two
+    clean embeddings of the same speaker. There was never anything to recover.
+
+    Measured 2026-08-25 (Stage B Session 3, ``refine_oracle_audio``): with the
+    candidate embedded from the CLEAN SOURCE and the gate accepting 300/300, the
+    deficit against ``no_recursion`` at depth 2 is **+0.002 dB (oracle) / +0.070
+    (real)** -- neutral, not helpful. Session 1's oracle-RULE ceiling bounded the
+    other axis at **<= +0.18 dB**. Both axes of the working window are therefore
+    closed near zero, and ``rounds`` now defaults to 0.
+
+    This also closes the variance-weighted-blend idea that Phase 2's close-out
+    left open: the argument above is weight-independent. If both terms are clean
+    embeddings of the same speaker, no reweighting of them helps.
+
+    Note the theory never predicted a gain here. ``docs/diarization_full_
+    mathematical_theory.pdf`` Remark 1 proves only that a refinement step is
+    SAFE -- a one-shot change bounded by ``L_e ||delta e_i||`` that does not
+    compound -- and Theorem 4's error bound ``sqrt(nu^2 + eps^2)`` contains no
+    refinement term. Turning it off costs nothing the theory promised. The candidate embedding is a running
     mean of the previous embedding and this new estimate (never a full
     replacement -- one bad round can't discard a good enrollment), gated by
     :func:`dagger.gate.confidence.confidence_gate` before being accepted. A
