@@ -1572,3 +1572,101 @@ direction of the error: where ground truth could check it, the gate was too PERM
 `ceiling_reject_gate_would_accept` fired **78 and 63 of 150** while
 `ceiling_accept_gate_would_reject` fired only **4 and 6** (Session 1). That is why raising
 `tau_margin` is the wrong lever: the signal is absent, the cut is not misplaced.
+
+---
+
+## SESSION C — THE TRAINING RUN: three unimplemented losses land here
+
+**Decided 2026-08-25.** The theory's objective (`docs/diarization_full_mathematical_theory.pdf`
+§10) is four terms:
+
+```
+L = λ1·L_sep  +  λ2·L_spk  +  λ3·L_recon  +  λ4·L_art
+```
+
+Only `L_sep` has ever been implemented (`dagger/losses/sisdr.py`). Session C implements the other
+three. Their statuses going in are **not the same**, and the difference is worth keeping.
+
+### 1. `L_recon` — the noise-head reconstruction loss. OVERDUE, not missing.
+
+```
+L_recon = || x_O − Σ_i ŝ_i − n̂ ||²
+```
+
+This one was **deliberately deferred with a stated deadline**, recorded in
+`dagger/losses/__init__.py`:
+
+> *"deliberately deferred, not yet implemented: WSJ0-2mix/LibriMix scenes are anechoic sums with no
+> noise term by construction, so Phase 1 trains noise-free (CLAUDE.md §2's explicit 'or train on
+> noise-free data' branch). **This noise head MUST land before Phase 3 trains on real/noisy
+> corpora**, or the reconstruction loss will fight the separation loss whenever noise != 0
+> (guardrail §6.5)."*
+
+Session C is the first Phase 3 training run, so **that deadline is now**. The deferral was correct:
+§2 permits either branch, and LibriMix genuinely has no noise term.
+
+**But the justification was about NOISE, and the term does a second job nobody named: it constrains
+the output LEVEL.** `L_recon` is not scale-invariant — if every `ŝ_i` came out 2.86x too loud,
+`Σ ŝ_i` would be 2.86x the mixture and this term would be enormous. `L_sep` (SI-SDR) fits the scale
+out before measuring error and therefore cannot see level at all.
+
+*So this is the root cause of Q5.* `G` emits the overlap region at a median **2.86x** the true
+amplitude (`level_error_db` +9.14, replicated at 3/25/50 scenes) precisely because the one loss term
+that would have constrained it was dropped -- for a reason that was valid on the axis it was argued
+on, and silent on the axis that mattered. **Q5 is therefore not a separate question with an
+inference-time fix; it is a consequence of an unimplemented loss, and it closes here.**
+
+*Why the inference-time patches were abandoned.* `match_level_to_mixture` (committed, default OFF)
+computes `c = <g, x_O>/<g, g>`, which is the **MMSE/Wiener gain** -- it deliberately attenuates, to
+0.597 at 1.7 dB SNR, so it lands the output at 0.59x instead of 1.0x; and its `MAX_RESCALE = 8`
+clamp refuses exactly the speakers whose error is worst (`alpha_2` reaches 19.5). The deeper problem
+is general: **any estimator that minimises squared error against the mixture shrinks**
+(errors-in-variables attenuation), so the whole family -- including a joint multi-speaker fit -- has
+the same flaw. The alternative, matching `G`'s overlap RMS to the speaker's solo-region RMS, works
+on LibriMix but assumes a speaker's level is stationary between regions. That is false on AMI-SDM:
+the Lombard effect (people raise their voice when talked over), head movement at a single distant
+mic, reverberation, and solo/overlap runs minutes apart all break it. **A training-time constraint
+is dataset-independent by construction; every inference-time patch smuggles in a corpus assumption.**
+
+### 2. `L_spk` — speaker consistency. NEVER SCHEDULED.
+
+Pushes `φ(ŝ_i)` toward `ē_i`: trains `G` to produce output that *embeds* like the right speaker.
+
+Named in CLAUDE.md §4's target layout and in `dagger/losses/__init__.py` ("remain unimplemented"),
+but **no phase's Build step has ever scheduled it**. That is a gap in the plan, not a deferral.
+
+*Why it belongs in Session C specifically.* Q1b measured the identity margin at J = **+0.046** on
+`G`'s output against J = **+0.453** on the clean source -- the formula is sound and starved, because
+`G`'s ~2 dB output embeds poorly. `L_spk` is the loss that directly optimises that quantity. The
+check we could not make work and the loss we never implemented are the same quantity, which is not
+a coincidence to leave unrecorded.
+
+### 3. `L_art` — artifact. NEVER SCHEDULED.
+
+Same status as `L_spk`: in §4's layout, in the package docstring, in no plan. Included here because
+Session C is the only training run in view and leaving one term of a four-term objective
+permanently unbuilt is worse than either building it or deleting it from §4.
+
+### How to add three terms at once without losing attribution
+
+Adding all three to one retrain means a quality change cannot be attributed to any of them. Two
+cheap protections, both of which have precedent in this phase's failures:
+
+* **Make every `λ` a config key**, so `λ_spk = λ_art = 0` reproduces a pure-`L_sep` run exactly.
+  A term that cannot be switched off cannot be ablated, and §9's "a flag that is read but never
+  forwarded" says to add a run that would visibly differ and assert that it does.
+* **Read the result on the metric each term targets**, not only on depth-2 SI-SDR:
+  `L_recon` -> `level_error_db` (should collapse toward 0, and this is the falsifiable part);
+  `L_spk` -> the clean-vs-extracted margin gap (0.019 should migrate toward 0.243);
+  `L_art`  -> `max_artifact_score`, which has fired 45 times in 10,950 decisions and is untuned.
+
+*The `L_recon` prediction is the sharpest test Session C carries:* if `level_error_db` does not fall,
+the level error is NOT explained by the missing loss and the whole diagnosis above is wrong.
+
+### Still-open Session C decisions, unchanged by this
+
+* training masks from oracle + `mask_augment`, or from real pyannote output cached once?
+* warm-start from clip50, or scratch?
+* the memory constraint: `build_scene_crop_dataset._prepare` holds each whole scene at
+  ~35 bytes/sample, so 800 two-minute scenes is 27 GB and Phase 2's 2400-scene count would need
+  81 GB.

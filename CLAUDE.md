@@ -252,10 +252,10 @@ and ordering proposed ≥ gated > ungated on 3+ speakers.
 > | # | question | status | evidence | what's left |
 > |---|---|---|---|---|
 > | 1 | **Confidence gate** | 🟠 **2 of 4 checks settled** | `V_i` tuned (J=+0.373 @1e-4), 196 firings, costs nothing. Margin: 4,106 firings, sound but starved (+0.453 clean vs +0.046 on `G`). **VAD 0 firings, artifact 45 — neither ever tuned**, in 10,950 decisions | fault fixtures for VAD + artifact; margin folds into Q2 |
-> | 2 | **Absolute quality** | 🔴 **UNTOUCHED — critical path** | oracle depth 2 = **1.69 dB**, unmoved since Stage A; ~13% of Phase 1's per-depth exposure | Session C retrain (mask source + warm-start still undecided) |
+> | 2 | **Absolute quality** | 🔴 **UNTOUCHED — critical path** | oracle depth 2 = **1.69 dB**, unmoved since Stage A; ~13% of Phase 1's per-depth exposure | Session C retrain, now also landing the **three unimplemented loss terms** (`L_recon`, `L_spk`, `L_art`) — see `journal/phase3.md` |
 > | 3 | **Solo/overlap masks** | ✅ **CLOSED** | **400 ms**, an interior optimum on `si_sdr_pooled`. At 50 scenes the gap goes **-3.18 -> -1.28 dB**, win 9% -> 23%: **60% of the diarization cost recovered** | make it the default; re-report Stage A under it |
 > | 4 | **Refinement** | ✅ **CLOSED — both axes** | rule axis <= **+0.18 dB**; perfect candidate + open gate = **+0.002 dB** | nothing; `rounds: 0` final |
-> | 5 | **Output level** | 🟠 **defect confirmed, fix unproven** | `G` emits overlap at **2.86x** (alpha_2 median 3.16, max 19.5); replicates 8.88 / 8.78 / **9.02 dB** at 3 / 25 / 50 scenes | replace the estimator (the current one computes the Wiener gain), then re-run |
+> | 5 | **Output level** | 🟠 **defect confirmed, ROOT CAUSE FOUND** | `G` emits overlap at **2.86x** (alpha_2 median 3.16, max 19.5); replicates 8.88 / 8.78 / **9.02 dB** at 3 / 25 / 50 scenes. Cause: `L_recon` is the only loss term that constrains level and it was never implemented | **folds into Q2** — Session C adds `L_recon`; no inference-time patch (they all smuggle in a corpus assumption) |
 >
 > *Two of the closures are NEGATIVE results with stated mechanisms, which is the stronger kind.*
 > Q4: refinement's premise was wrong, not its implementation — it assumed the extracted overlap
@@ -495,6 +495,19 @@ afternoon, a run that returns a believable wrong number costs a conclusion.
   runs** before the axes were separated — and no retraining was involved, the quantity had been in
   the pipeline the whole time, merely never recorded. The same mistake nearly recurred when a
   six-point dilation sweep would have averaged six pipelines into one cell labelled "depth 2".
+
+- **A deferral justified on one axis can be silently wrong on another.** `L_recon`
+  (`||x_O - sum s_hat_i - n_hat||^2`) was deliberately deferred, with a written rationale and a
+  deadline: LibriMix is an anechoic sum with no noise term, so §2's "or train on noise-free data"
+  branch applies, and `dagger/losses/__init__.py` records that the noise head "MUST land before
+  Phase 3 trains on real/noisy corpora". **Every word of that is correct** — and it is entirely
+  about NOISE. Nobody noticed the same term is also the only one that constrains output LEVEL:
+  `L_sep` is scale-invariant and structurally cannot. So `G` drifted to **2.86x** too loud in the
+  overlap region and stayed there for three phases (found 2026-08-23, root cause 2026-08-25).
+  The deferral note was reviewed repeatedly and never looked wrong, because on its own axis it
+  never was. **When deferring a component, list what it does — plural — and say which of those
+  jobs the deferral gives up.** A one-axis justification for a multi-job component is the shape
+  to distrust.
 
 - **A defect invisible to the whole measurement suite appears as no number at all.** `G` emitted the
   overlap region at **2.86x** the correct amplitude for three phases. Every metric here is
