@@ -27,7 +27,7 @@
 # every row pairs against the committed baseline and the knob's effect is
 # cleanly attributable. Note this corpus has NO depth 3 (chain at overlap 0.3
 # makes s1 and s3 disjoint); depth 3 arrives with the scheduled long-solo
-# geometry in the Session C training run.
+# geometry in the Stage C training run.
 #
 # READ THE TWO HALVES OF THE SWEEP TABLE TOGETHER. Dilation buys overlap-mask
 # recall with overlap-mask false alarm, which is the good trade -- but it also

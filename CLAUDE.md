@@ -252,13 +252,13 @@ and ordering proposed ≥ gated > ungated on 3+ speakers.
 > | # | question | status | evidence | what's left |
 > |---|---|---|---|---|
 > | 1 | **Confidence gate** | 🟠 **4 of 4 DIAGNOSED, 1 of 4 tuned** | `V_i` tuned (J=+0.373 @1e-4), 196 firings, costs nothing. Margin: sound but starved (+0.453 clean vs +0.046 on `G`). **VAD: same verdict** — J **+0.680** on clean audio vs **+0.000** on `G`, recomputed from a committed CSV with no new run. **Artifact: DEFECT** — `spectral_flatness` averaged silent frames (which score exactly 1.0), so it reported each speaker's duty cycle, not artifacts: clean 0.7376 vs `G` 0.7422, and `max_artifact_score: 0.9` sits **above pure white noise (0.847)** | run `phase3_gate_faults.yaml` to place the two thresholds; three of the four now trace back to `G`, i.e. to Q2 |
-> | 2 | **Absolute quality** | 🔴 **UNTOUCHED — critical path** | oracle depth 2 = **1.69 dB**, unmoved since Stage A; ~13% of Phase 1's per-depth exposure | Session C retrain, now also landing the **three unimplemented loss terms** (`L_recon`, `L_spk`, `L_art`) — see `journal/phase3.md` |
+> | 2 | **Absolute quality** | 🔴 **UNTOUCHED — critical path** | oracle depth 2 = **1.69 dB**, unmoved since Stage A; ~13% of Phase 1's per-depth exposure | Stage C retrain, now also landing the **three unimplemented loss terms** (`L_recon`, `L_spk`, `L_art`) — see `journal/phase3.md` |
 > | 3 | **Solo/overlap masks** | ✅ **CLOSED** | **400 ms**, an interior optimum on `si_sdr_pooled`. At 50 scenes the gap goes **-3.18 -> -1.28 dB**, win 9% -> 23%: **60% of the diarization cost recovered** | make it the default; re-report Stage A under it |
 > | 4 | **Refinement** | ✅ **CLOSED — both axes** | rule axis <= **+0.18 dB**; perfect candidate + open gate = **+0.002 dB** | nothing; `rounds: 0` final |
-> | 5 | **Output level** | 🟠 **defect confirmed, ROOT CAUSE FOUND** | `G` emits overlap at **2.86x** (alpha_2 median 3.16, max 19.5); replicates 8.88 / 8.78 / **9.02 dB** at 3 / 25 / 50 scenes. Cause: `L_recon` is the only loss term that constrains level and it was never implemented | **folds into Q2** — Session C adds `L_recon`; no inference-time patch (they all smuggle in a corpus assumption) |
+> | 5 | **Output level** | 🟠 **defect confirmed, ROOT CAUSE FOUND** | `G` emits overlap at **2.86x** (alpha_2 median 3.16, max 19.5); replicates 8.88 / 8.78 / **9.02 dB** at 3 / 25 / 50 scenes. Cause: `L_recon` is the only loss term that constrains level and it was never implemented | **folds into Q2** — Stage C adds `L_recon`; no inference-time patch (they all smuggle in a corpus assumption) |
 >
 > *Q1's two new diagnoses are falsifiable too, and both predictions are on record before the run
-> (`journal/phase3.md` § Session D): with the energy gate on, healthy `artifact_score` should fall
+> (`journal/phase3.md` § Stage B Session 4): with the energy gate on, healthy `artifact_score` should fall
 > **0.742 -> ~0.35-0.45** — if it does not move, the duty-cycle diagnosis is wrong — and the
 > `fault_clean_` arm should separate where the `fault_g_` arm does not.*
 >
@@ -266,7 +266,7 @@ and ordering proposed ≥ gated > ungated on 3+ speakers.
 > Q4: refinement's premise was wrong, not its implementation — it assumed the extracted overlap
 > beats "the raw mixture", but enrollment never used the mixture, it used the already-clean SOLO
 > region. Q1's margin: the formula was never broken, and that closure is **falsifiable** — re-run
-> the clean-margin probe after Session C and the extracted gap should migrate 0.019 -> 0.243.
+> the clean-margin probe after Stage C and the extracted gap should migrate 0.019 -> 0.243.
 >
 > *Q5 is not blocked on GPU, it is blocked on the estimator.* `match_level_to_mixture` computes the
 > MMSE/Wiener gain, which deliberately attenuates (0.6x at 1.7 dB SNR), and its `MAX_RESCALE = 8`
@@ -288,7 +288,7 @@ it); `V_i` never firing (threshold too loose) or firing on everything (too tight
 **Definition of done:** end-to-end results with real diarization, plus the oracle-vs-real gap table.
 
 
-> **Full working record: [`journal/phase3.md`](journal/phase3.md)** — Stage A's oracle-vs-real gap, Stage B Sessions A/B/1/2/3, the verification pass, the level-error discovery, and the two void runs with their post-mortems. Read it before touching the gate, the dilation default, the level fix, or Session C.
+> **Full working record: [`journal/phase3.md`](journal/phase3.md)** — Stage A's oracle-vs-real gap, Stage B Sessions A/B/1/2/3/4, the verification pass, the level-error discovery, and the two void runs with their post-mortems. Read it before touching the gate, the dilation default, the level fix, or Stage C.
 
 ### ☐ Phase 4 — Real corpora + full ablation
 

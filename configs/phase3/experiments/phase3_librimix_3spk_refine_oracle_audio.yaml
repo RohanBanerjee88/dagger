@@ -28,7 +28,7 @@
 #     becomes final on a mechanism, not on an accumulation of negatives.
 #   * positive -> the working region EXISTS and its boundary lies between
 #     today's G and perfect. Refinement then becomes a question about the
-#     training budget (Session C), not about the update rule.
+#     training budget (Stage C), not about the update rule.
 #
 # The other three systems never refine, so they are unaffected and remain a
 # valid control WITHIN this run -- no cross-run comparison needed.

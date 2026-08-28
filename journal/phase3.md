@@ -2,10 +2,10 @@
 
 Moved verbatim out of `CLAUDE.md` on 2026-08-25 (relocation only, no edits). The
 **five-question status table** stays in CLAUDE.md §5 and is the answer; this is the
-working record of getting there — Stage A, Stage B Sessions A/B/1/2/3, the
+working record of getting there — Stage A, Stage B Sessions A/B/1/2/3/4, the
 verification pass, and every void run and its post-mortem.
 
-Read before: touching the gate, the dilation default, the level fix, or Session C.
+Read before: touching the gate, the dilation default, the level fix, or Stage C.
 
 ---
 
@@ -561,10 +561,10 @@ nothing failing.
   in every regime measured -- and B2 is the run that decides whether that becomes final.
 * **Depth 3 does not exist in the Session B corpus.** Chain at overlap 0.3 makes s1 and s3
   disjoint. That is deliberate (comparability with the committed baseline); depth 3 arrives with
-  the scheduled long-solo geometry in Session C.
+  the scheduled long-solo geometry in Stage C.
 * **Absolute quality is still the extractor's operating point**, not diarization's -- the *oracle*
   arm reaches only 1.73 dB at depth 2. Nothing in Session A changed training, so nothing here could
-  have moved it. It is repaired, if at all, by Session C's training budget.
+  have moved it. It is repaired, if at all, by Stage C's training budget.
 
 ---
 
@@ -813,7 +813,7 @@ is. And once stated, the same root cause covers:
 
 **This makes a testable prediction: all four recover together as `G` improves.** That is a claim
 about the training budget, not about the gate design or the blend rule -- so it argues for spending
-Session C on training rather than on redesigning the acceptance rule, and it means a gate redesign
+Stage C on training rather than on redesigning the acceptance rule, and it means a gate redesign
 evaluated on *this* checkpoint would be measuring the extractor either way.
 
 Two caveats worth keeping attached. `V_i` is **not** in this family -- it embeds enrollment clips
@@ -898,7 +898,7 @@ prior run.
    would measure the knob and the diarizer together. A missing sibling degrades gracefully, since
    every CSV written before 2026-08-20 lacks one.
 
-7. **Session C's case is stronger than it was.** The mechanism above says the margin, the gate,
+7. **Stage C's case is stronger than it was.** The mechanism above says the margin, the gate,
    refinement and the ceiling are all downstream of `G`'s quality, so they cannot be fixed
    independently of it -- and a gate redesign evaluated on this checkpoint would be measuring the
    extractor regardless. Budget arithmetic is in Phase 2's close-out.
@@ -1046,7 +1046,7 @@ Session B already predicted for a partial detector (45.3% detection at 7.9% fals
 | # | item | status |
 |---|---|---|
 | 1 | gate has never been tuned | **`V_i` ANSWERED** (Session B tuned it, Session 2 priced it: FREE, +0.235 dB where it bites). The **margin is NOT** answered -- J=+0.046 is one point on the extractor axis. |
-| 2 | absolute quality | **Untouched.** Session C. Critical path. |
+| 2 | absolute quality | **Untouched.** Stage C. Critical path. |
 | 3 | activity masks / dilation | **Mechanism answered** (91% recovery). Operating point was blocked on a defective metric; the metric is now fixed but **the sweep must be re-run to read it**. |
 | 4 | refinement ceiling | **Unknown.** Re-run queued, ~1.7 h, unaffected by any of this. |
 
@@ -1067,7 +1067,7 @@ Session B already predicted for a partial detector (45.3% detection at 7.9% fals
 
 #### Still open, unchanged by this session
 
-* **Session C's training run**, blocked on two decisions: (a) do training masks come from oracle +
+* **Stage C's training run**, blocked on two decisions: (a) do training masks come from oracle +
   `mask_augment`, or from real pyannote output cached once in a CPU session? (b) warm-start from
   clip50, or scratch? `mask_augment.py` is written and unit-tested but has never touched a training
   run, and its motivation is partly undercut by dilation -- augmentation makes `G` robust to bad
@@ -1076,7 +1076,7 @@ Session B already predicted for a partial detector (45.3% detection at 7.9% fals
   no-residual rule, eval-encoder-not-training-encoder, the mask-source question, and now
   **which-slice-a-metric-scores**, which has caused three defects (the ceiling's objective, this
   one, and Test B's guard).
-* **The Session C memory constraint:** `build_scene_crop_dataset._prepare` keeps each whole scene
+* **The Stage C memory constraint:** `build_scene_crop_dataset._prepare` keeps each whole scene
   resident at ~35 bytes/sample, so a 2-minute scene is ~34 MB. 800 scenes is 27 GB (Kaggle's
   ceiling) and Phase 2's 2400-scene curriculum count would need **81 GB**. The model only ever sees
   4 s crops, so long scenes buy realistic enrollment and overlap density, not longer inputs.
@@ -1196,7 +1196,7 @@ permissive gate. Same shape as Test B: an assertion that cannot fail is not a pa
 | # | question | state | closes with |
 |---|---|---|---|
 | 1 | confidence gate | **2 of 4 checks settled.** `V_i` tuned (J=+0.373 @1e-4, free). Margin diagnosed: sound but starved (+0.453 clean vs +0.046 on `G`). **`min_vad_coverage` and `max_artifact_score` NEVER TUNED** -- 0 and 45 rejections in 10,950 decisions, and no fault population exists to sweep them against | fault fixtures for VAD + artifact; margin folds into Q2 |
-| 2 | absolute quality | **Untouched.** oracle d2 = 1.73 dB; ~13% of Phase 1's per-depth exposure | Session C retrain |
+| 2 | absolute quality | **Untouched.** oracle d2 = 1.73 dB; ~13% of Phase 1's per-depth exposure | Stage C retrain |
 | 3 | solo/overlap masks | **Mechanism answered** (91% recovered @800 ms); operating point open, now unblocked -- *ANSWERED 2026-08-24: 400 ms, see Session 1* | `dilation_v2`, 6.7 h, read `si_sdr_pooled` |
 | 4 | refinement window | **NEITHER END KNOWN** -- see below | `refine_ceiling` 1.7 h + `refine_oracle_audio` 1.7 h |
 | 5 | output level | **Root cause known**, fix implemented, unmeasured | `rescale` config |
@@ -1213,7 +1213,7 @@ bounds the acceptance rule, `oracle_audio` bounds the extractor.
 
 * **Session 1 (~8.9 h):** `refine_ceiling` (1.7 h) + `dilation_v2` (6.7 h). No new code needed.
 * **Session 2 (~8.9 h):** `refine_oracle_audio` (1.7 h) + `rescale` (1.7 h) + `vi_on` (5.0 h).
-* **Session 3:** Session C training, for #2.
+* **Session 3:** Stage C training, for #2.
 
 One notebook with a `SESSION` constant, committed once per session; `levelcheck.ipynb`'s cells 1-4
 are the proven setup header. Keep the one-fatal-assertion discipline: the reproduction gate aborts,
@@ -1349,7 +1349,7 @@ Median `level_error_db`, `no_recursion` vs the deflation systems:
 | # | question | state | closes with |
 |---|---|---|---|
 | 1 | confidence gate | **2 of 4 settled** (Session 3). `V_i` free; margin sound but starved. **VAD + artifact never tuned** (0 / 45 firings in 10,950) | fault fixtures for the other two |
-| 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
+| 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Stage C retrain -- CRITICAL PATH |
 | 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap recovered** | make it the default; re-report Stage A |
 | 4 | refinement window | **Rule axis CLOSED (<= +0.18 dB).** Extractor axis open | `refine_oracle_audio`, 1.7 h |
 | 5 | output level | **Confirmed at scale**, worse for deflation, grows with dilation | `rescale`, 1.7 h |
@@ -1477,7 +1477,7 @@ rescale on a noisy projection.
 | # | question | state | closes with |
 |---|---|---|---|
 | 1 | confidence gate | **2 of 4 settled.** `V_i` free, +0.235 dB where it bites -- default 1e-4. Margin sound but starved. **VAD + artifact unexamined** | fault fixtures for VAD + artifact |
-| 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Session C retrain -- CRITICAL PATH |
+| 2 | absolute quality | **Untouched.** oracle d2 = 1.69 dB | Stage C retrain -- CRITICAL PATH |
 | 3 | solo/overlap masks | **ANSWERED: 400 ms, 63% of the gap** | make it the default |
 | 4 | refinement window | Rule axis CLOSED (<= +0.18 dB). **Extractor axis VOID, not measured** | re-run `refine_oracle_audio` |
 | 5 | output level | Measured at 8.78 dB; **the fix is VOID, not measured** | re-run `rescale` |
@@ -1560,7 +1560,7 @@ a *perfect* extractor. On today's output that same threshold buys nothing: the S
 measured 19.9% detection against 15.2% false rejection there, i.e. J = +0.046 -- it rejects roughly
 as much good as bad, because the two distributions are 0.019 apart and almost entirely overlapping.
 No threshold anywhere separates them, so moving the cut only trades one error for the other. Re-run
-this probe after Session C and tune then.
+this probe after Stage C and tune then.
 
 *And note which way the gate errs, because it is easy to state backwards.* Both populations sit
 **ABOVE** the shipped `tau_margin: 0.1` (medians 0.43873 and 0.41965), so on this corpus the cut
@@ -1575,7 +1575,7 @@ direction of the error: where ground truth could check it, the gate was too PERM
 
 ---
 
-## SESSION C — THE TRAINING RUN: three unimplemented losses land here
+## STAGE C — THE TRAINING RUN: three unimplemented losses land here
 
 **Decided 2026-08-25.** The theory's objective (`docs/diarization_full_mathematical_theory.pdf`
 §10) is four terms:
@@ -1584,7 +1584,7 @@ direction of the error: where ground truth could check it, the gate was too PERM
 L = λ1·L_sep  +  λ2·L_spk  +  λ3·L_recon  +  λ4·L_art
 ```
 
-Only `L_sep` has ever been implemented (`dagger/losses/sisdr.py`). Session C implements the other
+Only `L_sep` has ever been implemented (`dagger/losses/sisdr.py`). Stage C implements the other
 three. Their statuses going in are **not the same**, and the difference is worth keeping.
 
 ### 1. `L_recon` — the noise-head reconstruction loss. OVERDUE, not missing.
@@ -1602,7 +1602,7 @@ This one was **deliberately deferred with a stated deadline**, recorded in
 > corpora**, or the reconstruction loss will fight the separation loss whenever noise != 0
 > (guardrail §6.5)."*
 
-Session C is the first Phase 3 training run, so **that deadline is now**. The deferral was correct:
+Stage C is the first Phase 3 training run, so **that deadline is now**. The deferral was correct:
 §2 permits either branch, and LibriMix genuinely has no noise term.
 
 **But the justification was about NOISE, and the term does a second job nobody named: it constrains
@@ -1635,17 +1635,140 @@ Pushes `φ(ŝ_i)` toward `ē_i`: trains `G` to produce output that *embeds* like
 Named in CLAUDE.md §4's target layout and in `dagger/losses/__init__.py` ("remain unimplemented"),
 but **no phase's Build step has ever scheduled it**. That is a gap in the plan, not a deferral.
 
-*Why it belongs in Session C specifically.* Q1b measured the identity margin at J = **+0.046** on
+*Why it belongs in Stage C specifically.* Q1b measured the identity margin at J = **+0.046** on
 `G`'s output against J = **+0.453** on the clean source -- the formula is sound and starved, because
 `G`'s ~2 dB output embeds poorly. `L_spk` is the loss that directly optimises that quantity. The
 check we could not make work and the loss we never implemented are the same quantity, which is not
 a coincidence to leave unrecorded.
 
-### 3. `L_art` — artifact. NEVER SCHEDULED.
+### 3. `L_art` — artifact. NEVER SCHEDULED, AND NEVER DEFINED. **DECISION OPEN.**
 
-Same status as `L_spk`: in §4's layout, in the package docstring, in no plan. Included here because
-Session C is the only training run in view and leaving one term of a four-term objective
-permanently unbuilt is worse than either building it or deleting it from §4.
+> **Status 2026-08-28: the formula is NOT chosen.** What follows is (a) the finding that no
+> definition exists anywhere, (b) the consistency constraint the theory doc supplies for its own
+> terms, which any candidate must satisfy, and (c) **one candidate** that satisfies it, recorded as
+> an option rather than a decision. **Stage C does not proceed until this is settled.**
+>
+> Note what the candidate rests on and what it does not. Its *consistency* argument is solid — it
+> vanishes at the truth, which is the doc's own test. Its *premise* — that spectral flatness is the
+> right thing to measure at all — rests on a diagnostic found broken three days earlier
+> (Stage B Session 4), and has never been checked against a real artifact population.
+> `phase3_gate_faults.yaml` is the run that would check it.
+
+Worse than `L_spk`'s status. `L_spk` at least has a stated meaning ("push `φ(ŝ_i)` toward `ē_i`").
+`L_art` had **no formula anywhere** — not in `dagger/losses/`, not in this journal, and *not in the
+theory doc either*. The word "Artifact" appears exactly **twice** in
+`docs/diarization_full_mathematical_theory.pdf` and is defined in neither place:
+
+* §9 Eq. (16): `C_i = α·Sim(φ(ŝ_i), e_i) + β·Speech(ŝ_i) − γ·Leak(ŝ_i) − δ·Artifact(ŝ_i)`
+* §10: `L = λ1·L_sep + λ2·L_spk + λ3·L_recon + λ4·L_art`
+
+§10 writes `L_sep` and `L_recon` out in full and leaves `L_art` a bare symbol. (`Speech(ŝ_i)` is in
+the same position.) So there was nothing to look up, and Stage C was gated on deriving it.
+
+**The constraint the doc supplies for its own terms.** Proposition 7 and Corollary 1 establish a
+test every term in this objective must pass: *it must vanish at the truth, or it fights `L_sep`*.
+That is exactly the noise argument — `L_recon` without `n̂` is nonzero at `ŝ_i = s_i`, so no estimate
+zeroes both, and the repair is `n̂` so the truth becomes a common minimiser.
+
+**The obvious candidate fails that test.** `L_art = F(ŝ_i)` for `F` = spectral flatness would drive
+`F -> 0`, but clean speech measures `F ≈ 0.37` (Stage B Session 4), not 0. Minimising it moves `ŝ_i` AWAY
+from `s_i`. That is Proposition 7's conflict one term over, and it would have been nastier than the
+noise case: `L_sep` and `L_art` would trade against each other with no committed metric able to say
+which was winning.
+
+**CANDIDATE (not chosen) — deviation from the target, i.e. Corollary 1's repair reapplied:**
+
+```
+L_art = ( F(ŝ_i ⊙ w_Oi) − F(s_i ⊙ w_Oi) )²
+```
+
+* Exactly 0 at `ŝ_i = s_i`, so `(s_i, n)` stays a common minimiser of all four terms.
+* `F(s_i ⊙ w_Oi)` is constant in θ — computed once under `no_grad` per (item, speaker).
+* `F` is the **energy-gated** flatness from Stage B Session 4, in torch: frames above −40 dB of the clip
+  peak, `exp(mean(log(|X|+ε)))/mean(|X|)`. Differentiable; the frame-selection mask is detached.
+* Scored on the **overlap-windowed slice** — the same slice the training loop already scores, and
+  the same quantity `max_artifact_score` reads, so the gate check is this term's read-out. That is
+  the attribution rule this section already sets for the other two terms.
+* Needs the clean target at training time, which `batch["sources"]` already carries. No pipeline
+  change, same as `L_recon`.
+
+#### THE CANDIDATE WAS MEASURED 2026-08-28 AND IT ORDERS BAD OUTPUTS WRONG
+
+Before adopting it, `F` was scored on one speech-like target (`F(s_i) = 0.3268`) against three
+estimates. SI-SDR is included as the ground-truth ordering:
+
+| estimate | SI-SDR | `F(ŝ_i)` | candidate `L_art` |
+|---|---|---|---|
+| A  good extraction | **+17.0 dB** | 0.5836 | **0.06592** |
+| B  broadband hiss | +4.9 dB | 0.7495 | 0.17861 |
+| C  80% spectral holes | **−37.8 dB** | 0.3078 | **0.00036** |
+
+**Row C is a destroyed signal and the loss charges it essentially nothing — 180x LESS than the good
+17 dB extraction in row A.** The term has a pathological minimum: it would prefer that `G` wreck the
+signal via spectral holes over extracting it well.
+
+*Mechanism.* `F` is hypersensitive upward (mild additive noise fills the spectral valleys, and the
+geometric mean is dominated by its smallest bins, so a 17 dB estimate already reads 0.58) and nearly
+blind downward (`punch_holes` resynthesises with 4x overlap-add, so neighbours refill what was
+zeroed; the output is phase-wrecked but its flatness statistics land back near the target's). So `F`
+mostly tracks the broadband noise floor — which `L_sep` already penalises well — and misses the
+structural corruption `L_art` was meant to add value on.
+
+**The lesson, and it generalises past this term.** The consistency derivation was *correct* and
+still is: the candidate does vanish at the truth, which is the doc's own test. What was never
+checked is whether `F` **orders bad outputs sensibly**, and vanishing-at-truth says nothing about
+that — a term can be zero in the right place and have its gradient point somewhere useless
+everywhere else. **Any candidate for `L_art` must pass BOTH tests: zero at the truth, AND monotone
+against SI-SDR across a set of deliberately damaged estimates.** The three-row table above is the
+cheap screen; run it before adopting anything here. This is the same blindness Stage B Session 4 found in
+the same diagnostic (0.7376 clean vs 0.7422 on `G`'s output), one layer up and now with a sign that
+rewards damage.
+
+*If a flatness-based candidate is chosen anyway*, the argument for **two-sided rather than a
+one-sided hinge** — and the reason is not symmetry-for-its-own-sake.
+`relu(F(ŝ)−F(s))²` assumes every artifact RAISES flatness. Stage B Session 4 put that in doubt: musical
+noise is sparse and tonal and may lower it, which is what `phase3_gate_faults.yaml` exists to
+measure. The doc names the downward failure too — §5's reading says a network on clean audio
+*"can only add artifacts (over-suppression, phase distortion)"*, and over-suppression makes output
+LESS flat than the target. A two-sided term catches both families and assumes neither.
+
+*A design property worth naming, not just a convenience:* two-sided also decouples Stage C from
+the gate_faults run. A one-sided loss would need the direction answer to fix its sign, so a
+training run would depend on a GPU run that has not happened. **A formula that requires knowing
+which way a failure goes is more fragile than one that penalises departure from ground truth in
+either direction.**
+
+### Two implementation constraints found 2026-08-28, neither previously recorded
+
+**`L_recon` collides with the loop's memory workaround, and the collision is invisible from either
+side.** `scripts/train_phase1.py` backwards **per speaker** on purpose — *"summing all speakers'
+losses before `backward()` holds `num_speakers` full TF-GridNet graphs and OOMs on 16 GB GPUs"* —
+while `L_recon = ||x_O − Σ_i ŝ_i − n̂||²` needs every `ŝ_i` alive at once. The line-211 comment is
+correct about what existed then; §10 is correct about the theory; nobody wrote down their
+intersection. (Same shape as the `L_recon` deferral being right on the noise axis and silent on the
+level axis.)
+
+*It resolves exactly, not approximately.* Add a `no_grad` pass to build `Σ_j ŝ_j` as values, then
+keep the per-speaker backward with the other speakers detached:
+
+```
+r = x_O − Σ_j ŝ_j − n̂            # computed once; all terms detached-valued
+L_recon_i = ||r||²  with only ŝ_i attached
+```
+
+`detach` changes no *values*, so `r_i == r` for every `i`, and gradients accumulate across
+`backward()` calls — giving `Σ_i 2r·(−∂ŝ_i/∂θ)`, which is the **exact** gradient of the true
+`L_recon`. Cost is 2x forward compute, zero extra memory, and the existing loop survives unchanged.
+
+**`L_spk` has no gradient path today.** `TitaNetEncoder.embed` resamples 8 kHz -> 16 kHz through
+`dagger.data.audio_io.resample`, which is **numpy** (`dagger/enroll/encoder.py:143-145`), so
+gradients cannot flow from `ŝ_i` back through `φ`. **Decided: build a torch-differentiable `φ`
+path** — `torchaudio.functional.resample` plus the NeMo model's forward, weights frozen, gradients
+flowing to the input only. The alternative (a cheap spectral proxy) was rejected because it
+optimises a different quantity than the margin check reads, which would make the 0.019 -> 0.243
+prediction untestable: a null result could not distinguish "the loss failed" from "the proxy was
+unrelated to the margin". Note this does not violate §6.3 — that rule is eval-encoder ≠ training
+encoder, and `φ` IS the training encoder.
 
 ### How to add three terms at once without losing attribution
 
@@ -1660,20 +1783,42 @@ cheap protections, both of which have precedent in this phase's failures:
   `L_spk` -> the clean-vs-extracted margin gap (0.019 should migrate toward 0.243);
   `L_art`  -> `max_artifact_score`, which has fired 45 times in 10,950 decisions and is untuned.
 
-*The `L_recon` prediction is the sharpest test Session C carries:* if `level_error_db` does not fall,
+*The `L_recon` prediction is the sharpest test Stage C carries:* if `level_error_db` does not fall,
 the level error is NOT explained by the missing loss and the whole diagnosis above is wrong.
 
-### Still-open Session C decisions, unchanged by this
+### Stage C decisions — SETTLED 2026-08-28
 
-* training masks from oracle + `mask_augment`, or from real pyannote output cached once?
-* warm-start from clip50, or scratch?
-* the memory constraint: `build_scene_crop_dataset._prepare` holds each whole scene at
-  ~35 bytes/sample, so 800 two-minute scenes is 27 GB and Phase 2's 2400-scene count would need
-  81 GB.
+**Training masks: oracle + `mask_augment`.** Not cached pyannote output. The deciding argument is
+where a diarization error *lands*: with augmentation it degrades the INPUT mask, which is the thing
+`G` is meant to become robust to. With real pyannote output it would have to pass through
+cluster-to-speaker mapping first — training needs `(x_O, ē_i) -> s_i` and a diarizer cluster is not
+a labelled speaker — so every mapping error becomes a corrupted TARGET, which is strictly worse
+than a corrupted input. `dagger/data/mask_augment.py` is also already built, tested and seeded, and
+simulates the *measured* 2-minute profile (miss 0.105, confusion 0.008, overlap recall 0.758)
+rather than an assumed one. That module's own docstring records the cost of getting this wrong
+once already: label-swap augmentation designed off short-scene DER that turned out broken.
+
+**Initialization: from scratch.** Not warm-started from `..._scratch_clip50.pt`. Warm-starting is
+cheaper and would converge inside a session budget, but that checkpoint carries **the exact
+pathology under test** — it emits the overlap region at 2.86x. Asking `L_recon` to undo a learned
+bias means a null result cannot distinguish "the loss is too weak" from "the initialization was too
+sticky", which converts Stage C's sharpest falsifiable prediction (*`level_error_db` should
+collapse toward 0; if it does not, the missing-loss diagnosis is wrong*) into an uninterpretable
+one. The extra GPU buys the ability to believe the answer either way.
+
+**Corollary for the attribution baseline.** Stage C already changes three things at once, and the
+protection above is that every `λ` is a config key so `λ_spk = λ_art = 0` reproduces a pure-`L_sep`
+run exactly. The mask source must obey the same rule: **run the baseline arm with `mask_augment`
+off**, so the arm being compared against differs from Phase 2 in the losses and in nothing else.
+Otherwise four simultaneous changes produce one unattributable number.
+
+**The constraint that bounds both** (not a decision): `build_scene_crop_dataset._prepare` holds each
+whole scene at ~35 bytes/sample, so 800 two-minute scenes is 27 GB and Phase 2's 2400-scene count
+would need 81 GB.
 
 ---
 
-## SESSION D — Q1's last two checks get a fault population (2026-08-28)
+## STAGE B — SESSION 4: Q1's last two checks get a fault population (2026-08-28)
 
 **What this session did.** Built the manufactured fault fixtures that `min_vad_coverage` and
 `max_artifact_score` have never had, and in doing so found that one of the two checks was not

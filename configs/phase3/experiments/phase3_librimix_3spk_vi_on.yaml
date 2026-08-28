@@ -54,7 +54,7 @@
 #
 # THE THRESHOLD WILL NOT TRANSFER. The usable window is one order of magnitude
 # wide (1e-5 and 5e-4 both give J ~ 0). Re-run `tune_gate.py` whenever the
-# corpus or the checkpoint changes -- in particular after any Session C
+# corpus or the checkpoint changes -- in particular after any Stage C
 # retraining, this value is void.
 #
 #   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/run_phase3.py \
