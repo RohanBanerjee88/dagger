@@ -85,6 +85,7 @@ def refine_embeddings(
     max_mean_variance: float,
     min_vad_coverage: float,
     max_artifact_score: float,
+    artifact_min_energy_db: float | None = None,
     accept_fn: Callable[[int, np.ndarray, np.ndarray], bool] | None = None,
     candidate_audio: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[list[GateResult | None]]]:
@@ -294,6 +295,7 @@ def refine_embeddings(
                 max_mean_variance=max_mean_variance,
                 min_vad_coverage=min_vad_coverage,
                 max_artifact_score=max_artifact_score,
+                artifact_min_energy_db=artifact_min_energy_db,
                 # raw_embedding == encoder.embed(clip, sample_rate), computed
                 # just above -- avoids a redundant TitaNet call inside
                 # confidence_gate's margin check for the same clip.

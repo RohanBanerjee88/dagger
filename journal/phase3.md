@@ -1670,3 +1670,152 @@ the level error is NOT explained by the missing loss and the whole diagnosis abo
 * the memory constraint: `build_scene_crop_dataset._prepare` holds each whole scene at
   ~35 bytes/sample, so 800 two-minute scenes is 27 GB and Phase 2's 2400-scene count would need
   81 GB.
+
+---
+
+## SESSION D — Q1's last two checks get a fault population (2026-08-28)
+
+**What this session did.** Built the manufactured fault fixtures that `min_vad_coverage` and
+`max_artifact_score` have never had, and in doing so found that one of the two checks was not
+measuring what its name says. No GPU was used; every number below comes from committed CSVs or
+from CPU probes of the diagnostics themselves.
+
+### Finding 1 — `vad_coverage` is a detector, and a labelled fault population was already committed
+
+`clean_swapped` (Session 3's Q1b arm) puts speaker *j*'s clean source into speaker *i*'s overlap
+window. Where *j* is not talking there, it is silence — which is precisely the "output contains no
+speech where it should" failure `min_vad_coverage` exists to catch. Recomputed from
+`experiment_stage_B_run_4/.../gate_tune_clean_margin.csv`, no new run:
+
+| `min_vad_coverage` | detection | false rej. | J |
+|---|---|---|---|
+| 0.5 | 65.3% | 0.0% | +0.653 |
+| **0.6** | **68.0%** | **0.0%** | **+0.680** |
+| 0.7 | 70.7% | 13.3% | +0.573 |
+
+The same contrast **on `G`'s output** (`swapped` vs `correct`) scores **J = +0.000** at every
+threshold, and −0.047 at 0.9.
+
+**That is the margin's verdict again, one check over: sound diagnostic, starved by `G`.** It is the
+third instance of §9's "measuring one point on an axis and calling it a property of the design",
+and the unswept axis was the extractor all three times. The data to see it had been sitting in a
+committed file since Session 3; nobody ran the sweep because `_rate_sweep` was the only thing
+pointed at that column.
+
+### Finding 2 — `max_artifact_score` was reporting each speaker's DUTY CYCLE
+
+`spectral_flatness` averaged over every frame of the estimate, and a digitally silent frame has
+every bin pinned at the `eps` floor, so its geometric and arithmetic means are equal and it scores
+exactly **1.0** — maximally "artifact-like" while containing nothing. The estimate it is handed is
+`x*w_Ei + G(x_O,e_i)*w_Oi`, and `crossfade_windows` guarantees `w_Ei + w_Oi == activity_i`:
+**outside speaker `i`'s activity BOTH windows are zero and the estimate is exactly zero.** In a
+scheduled 3-speaker scene that is over half the track.
+
+Two measurements, and it is the disagreement between them that matters:
+
+| | flatness |
+|---|---|
+| clean source (`clean_correct`) | **0.7376** |
+| `G`'s ~2 dB output (`correct`) | **0.7422** |
+| pure white noise (CPU probe) | 0.847 |
+| digital silence (CPU probe) | 1.000 |
+
+A **0.005** gap between pristine audio and near-garbage is no dynamic range at all, and the shipped
+`max_artifact_score: 0.9` sits **above pure white noise** — the check could not have rejected an
+estimate that was 100% noise. It has fired 45 times in 10,950 decisions, and those 45 were almost
+certainly the quietest speakers rather than the most damaged ones.
+
+*Same signature as Q5's level error:* a defect no committed metric could contradict, surfacing only
+as a disagreement between two quantities rather than as a bad number.
+
+### Finding 3 — `active_mask`'s −40 dB floor sets what a VAD fixture can be
+
+Measured on a synthetic harmonic, region-selective attenuation against `vad_coverage`:
+
+| attenuation | −20 dB | −30 dB | −40 dB | −50 dB |
+|---|---|---|---|---|
+| coverage | 1.000 | 1.000 | 0.116 | 0.025 |
+
+The first fixture written was `quiet_30db`, which is **inert** — it sits entirely on the wrong side
+of the cliff and would have produced a detection column of 0% that read as a broken generator. The
+catalogue now straddles the floor (20/30/40/50 dB), so the two above it are deliberate NEGATIVE
+controls and the sweep *locates* the floor instead of assuming it.
+
+Note also what is NOT a valid fixture: a uniform whole-signal gain. `active_mask` thresholds each
+frame against the clip's own peak, so global attenuation is invisible — the same scale-invariance
+that hid Q5's 2.86x error from every SI-SDR here. A region-selective gain works only because the
+loud, untouched solo copy holds the peak reference in place. `test_gate_faults.py` pins both halves.
+
+### What landed
+
+* `dagger/gate/faults.py` (**NOT DEPLOYABLE**) — `drop_span`, `attenuate`, `add_noise`,
+  `punch_holes`. Every fixture GRADED: a binary "emit silence" fault scores J = 1.0 at every
+  candidate and therefore places none, which is the degenerate sweep oracle-region `V_i` produced.
+* `spectral_flatness(min_energy_db=...)` — **opt-in, default `None`**, so every committed
+  `artifact_score` column stays regenerable by its own generator. Threaded to four call sites via
+  one named reader, `dagger.gate.confidence.artifact_min_energy_db`.
+* `scripts/tune_gate.py` — `G` now runs **once per speaker** and every fault population is a numpy
+  corruption of the cached tensor, so ten populations cost one extraction. Graded detection tables,
+  a direction report, and four guards: non-empty populations, grid-endpoint, per-fixture inertness,
+  and fault-sign disagreement.
+* `configs/phase3/experiments/phase3_gate_faults.yaml`.
+
+### Why the suggestion criterion is not Youden's J
+
+J needs one faulty population; a graded family has five, and they disagree. On a worked example the
+J against `dropout_75` picks 0.55 while the J against `dropout_25` picks 0.80 — same data, opposite
+answers, and which severities appear in the table is arbitrary. Both detection and false rejection
+are monotone in the threshold, so there is no interior optimum to search for; an argmax over a
+monotone curve finds sampling noise, not a peak. The rule is instead **the tightest threshold whose
+false rejection stays within `max_false_rejection` (5%)**, which puts the value judgment — a false
+rejection costs quality on every scene, a missed detection only on faulty ones — on the record
+rather than inside J's unchosen 1:1 weighting.
+
+### Predictions on record, so the run can falsify them
+
+1. With `min_energy_db: -40`, healthy `artifact_score` falls **0.742 → ~0.35–0.45**. If it does not
+   move, the duty-cycle diagnosis is wrong.
+2. The `fault_g_` arm stays a non-detector for both checks; the `fault_clean_` arm separates. Q1
+   then reads "4 of 4 diagnosed, 2 of them starved by `G`".
+3. `add_noise` and `punch_holes` may move `artifact_score` in **opposite** directions. If they do,
+   `max_artifact_score` needs replacing, not tuning.
+
+### Verification
+
+Suite **516 passed, 1 skipped**. Each fixture was then deliberately neutered to confirm its guard
+reddens — §9's "a test that cannot fail is not a passing test", discharged rather than asserted:
+
+```
+punch_holes  neutered -> RED: test_punch_holes_actually_changes_the_signal
+drop_span    neutered -> RED: test_dropout_lowers_vad_coverage_monotonically
+attenuate    neutered -> RED: test_attenuation_is_detectable_only_below_active_masks_floor
+add_noise    neutered -> RED: test_additive_noise_raises_flatness_monotonically
+energy_gate  neutered -> RED: test_silent_frames_inflate_ungated_flatness_and_the_gate_removes_them
+```
+
+The report generators were also exercised on synthetic rows before spending GPU on them: the graded
+table, the empty-clean-arm path, and the sign-disagreement guard all render correctly.
+
+### Two defects caught during implementation, both worth recording
+
+* **`_row` and `_fault_row` briefly measured different quantities.** `_fault_row` forwarded
+  `artifact_min_energy_db`; `_row` did not. Healthy populations would have carried whole-track
+  flatness (~0.74) and every fault the gated value (~0.4), so the sweep would have reported that
+  *every* corruption LOWERS flatness — including additive noise, which provably raises it — and
+  `_direction_report` would have printed "FAULTS DISAGREE IN SIGN" for you to read as Finding 3.
+  **Nothing would have failed.** Neither the inertness guard nor the non-empty guard catches this;
+  what catches it is asking whether two compared numbers came out of the same function.
+* **The pairing guard made the two older `tune_gate` configs un-runnable.** Both now carry
+  `artifact_min_energy_db: null` — the guard's point is a decision on the record, not a particular
+  value, and §7 requires those committed results to stay regenerable.
+
+### Q1 after this session
+
+| check | config key | status |
+|---|---|---|
+| identity margin `M_i` | `tau_margin` | diagnosed: sound, starved by `G` |
+| enrollment variance `V_i` | `max_mean_variance` | **tuned** (0.05 → 1e-4) and priced (free) |
+| speech coverage | `min_vad_coverage` | **diagnosed: sound, starved** (J +0.680 clean, +0.000 on `G`); fixture built, threshold pending the run |
+| artifact score | `max_artifact_score` | **defect found** — measures duty cycle; fix opt-in, fixture built, threshold pending the run |
+
+**4 of 4 now diagnosed; 1 of 4 tuned.** Three of the four trace back to `G`'s quality, which is Q2.

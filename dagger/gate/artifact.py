@@ -47,13 +47,38 @@ def vad_coverage(
     return float(np.mean(detected[expected]))
 
 
-def spectral_flatness(estimate: np.ndarray, n_fft: int = 512, hop: int = 128) -> float:
-    """Mean spectral flatness (geometric mean / arithmetic mean of the magnitude
-    spectrum, a.k.a. Wiener entropy) across frames, in ``[0, 1]``.
+def spectral_flatness(
+        estimate: np.ndarray,
+        n_fft: int = 512,
+        hop: int = 128,
+        *,
+        min_energy_db: float | None = None
+) -> float:
+    """Mean spectral flatness of ``estimate`` over time.
 
-    Closer to 1 means noise-like (flat spectrum -- a proxy for mask-based
-    separation artifacts / musical noise); closer to 0 means tonal/speech-like.
-    ``nan`` if the estimate is shorter than one frame.
+    Spectral flatness is a measure of how noise-like a signal is. A value of 1
+    indicates a flat spectrum (white noise), while a value closer to 0 indicates
+    a more tonal signal (like speech). High spectral flatness in the estimate
+    suggests artifacts rather than clean speech.
+
+    Args:
+        estimate: The audio signal to analyze.
+        n_fft: The number of FFT points for the STFT.
+        hop: The hop length for the STFT.
+        min_energy_db: If provided, keep only frames whose energy is within this
+            many dB of the clip's PEAK frame energy (so it is relative, not an
+            absolute level) -- the same peak-relative convention
+            ``dagger.data.activity.active_mask`` uses, so both gate checks agree
+            on what "a frame with speech in it" means. ``None`` reproduces the
+            pre-2026-08-26 whole-track mean exactly. A ``max_artifact_score``
+            tuned WITH gating is a threshold on a different quantity than one
+            tuned without it, so the two must travel together --
+            ``scripts/tune_gate.py`` refuses to recommend a threshold unless the
+            config states ``artifact_min_energy_db`` explicitly.
+
+
+    Returns:
+        The mean spectral flatness of the estimate.
     """
     x = np.asarray(estimate, dtype=np.float64)
     n = x.shape[0]
@@ -61,13 +86,27 @@ def spectral_flatness(estimate: np.ndarray, n_fft: int = 512, hop: int = 128) ->
         return float("nan")
     eps = 1e-10
     window = np.hanning(n_fft)
+    starts = list(range(0, n - n_fft + 1, hop))
+
+    if min_energy_db is not None:
+        # Energy in the RAW frame, not the windowed one: active mask
+        # measures box-averaged power on the raw samples, and a Hann taper would make the 
+        # same speech frame look quieter purely by position within the hop
+        energies = np.array([float(np.mean(x[s : s + n_fft] ** 2)) for s in starts])
+        floor_ref = float(energies.max())
+        if floor_ref <= 0.0:
+            # Every frame is digital silence, so the mean spectral flatness 
+            # which is an "artifact-like" measurement. 
+            return 1.0
+        floor = floor_ref * (10.0 ** (min_energy_db / 10.0)) # energy is power -> /10
+        starts = [s for s, e in zip(starts, energies) if e >= floor]
     flatness_per_frame = []
-    for start in range(0, n - n_fft + 1, hop):
+    for start in starts:
         frame = x[start : start + n_fft] * window
         spec = np.abs(np.fft.rfft(frame)) + eps
-        geo_mean = float(np.exp(np.mean(np.log(spec))))
-        arith_mean = float(np.mean(spec))
-        flatness_per_frame.append(geo_mean / arith_mean)
+        geometric_mean = float(np.exp(np.mean(np.log(spec))))
+        arithmetic_mean = float(np.mean(spec))
+        flatness_per_frame.append(geometric_mean / arithmetic_mean)
     if not flatness_per_frame:
         return float("nan")
     return float(np.mean(flatness_per_frame))

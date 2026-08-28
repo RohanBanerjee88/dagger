@@ -119,6 +119,41 @@ class TestArtifactChecks:
     def test_spectral_flatness_nan_for_short_signal(self):
         assert np.isnan(spectral_flatness(np.zeros(10), n_fft=512))
 
+    def test_spectral_flatness_default_is_unchanged_by_the_energy_gate_parameter(self):
+        # The regression lock for CLAUDE.md §7: every committed artifact_score
+        # column must stay regenerable by its own generator. Passing None must
+        # be the pre-2026-08-26 function exactly, not approximately.
+        rng = np.random.default_rng(0)
+        signal = rng.normal(size=4000) * np.repeat([1.0, 0.0], 2000)
+        assert spectral_flatness(signal) == spectral_flatness(signal, min_energy_db=None)
+
+    def test_silent_frames_inflate_ungated_flatness_and_the_gate_removes_them(self):
+        # The mechanism behind the 0.005 clean-vs-G gap: a digitally silent frame
+        # has every bin at the eps floor, so geo == arith and it scores exactly
+        # 1.0 -- maximally "artifact-like" while containing nothing.
+        tone = make_tone(4000, 220.0, amp=0.8)
+        padded = np.concatenate([tone, np.zeros(4000)])
+        assert spectral_flatness(padded) > spectral_flatness(tone) + 0.1
+        gated = spectral_flatness(padded, min_energy_db=-40.0)
+        assert abs(gated - spectral_flatness(tone, min_energy_db=-40.0)) < 0.05
+
+    def test_energy_gated_flatness_still_separates_tone_from_noise(self):
+        rng = np.random.default_rng(0)
+        tone = make_tone(4000, 220.0, amp=0.8)
+        noise = rng.normal(size=4000)
+        assert spectral_flatness(tone, min_energy_db=-40.0) < spectral_flatness(noise, min_energy_db=-40.0)
+
+    def test_all_silent_estimate_scores_1_in_both_modes(self):
+        # Silence is a real measurement here, not an undefined one, and the two
+        # modes must agree on it. If this returned nan, tune_gate.py's `_values`
+        # would drop the most severe fault we can manufacture out of the sweep
+        # while every table still printed a recommendation. Not exact equality:
+        # geo/arith over a constant eps spectrum lands at 1.000000000000003.
+        silence = np.zeros(4000)
+        assert spectral_flatness(silence) == pytest.approx(1.0)
+        assert spectral_flatness(silence, min_energy_db=-40.0) == pytest.approx(1.0)
+
+
 
 class TestConfidenceGate:
     _kwargs = dict(tau_margin=0.0, max_mean_variance=0.01, min_vad_coverage=0.5, max_artifact_score=0.9)

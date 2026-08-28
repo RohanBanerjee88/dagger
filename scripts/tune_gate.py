@@ -70,7 +70,11 @@ from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
 from dagger.extract.tfgridnet_crossattn import TFGridNetCrossAttnExtractor
 from dagger.gate.confidence import gate_diagnostics
 from dagger.reconstruct.stitch import crossfade_windows, reconstruct_all
-
+from dagger.gate import faults
+from dagger.gate.artifact import spectral_flatness, vad_coverage
+from dagger.gate.confidence import artifact_min_energy_db as read_artifact_min_energy_db
+from dagger.gate.confidence import gate_diagnostics
+import zlib
 DIAGNOSTIC_FIELDS = [
     "scene", "speaker", "m", "population",
     "mean_variance", "margin", "vad_coverage", "artifact_score",
@@ -93,6 +97,39 @@ CLEAN_CORRECT, CLEAN_SWAPPED = "clean_correct", "clean_swapped"
 # it is asking for "better than nearly nothing", not for a good detector.
 MIN_USEFUL_YOUDEN_J = 0.1
 
+#: Manufactured fault populations (:mod:`dagger.gate.faults`, NOT DEPLOYABLE).
+#: Each entry is (severity label, corruption). Severity is baked in here rather tahn taken from config.
+#: In this way, the population names in the CSV are self-describing -- a commited 'results' file that says `fault_g_dropout_50` needs no companion
+#: config to be read three months later.
+VAD_FAULTS = (
+    ("dropout_25", lambda s,r,g: faults.drop_span(s, r, 0.25, rng=g)),
+    ("dropout_50", lambda s,r,g: faults.drop_span(s, r, 0.50, rng=g)),
+    ("dropout_75", lambda s,r,g: faults.drop_span(s, r, 0.75, rng=g)),
+    ("dropout_90", lambda s,r,g: faults.drop_span(s, r, 0.90, rng=g)),
+    ("quiet_20db", lambda s, r, g: faults.attenuate(s, r, -20.0)),
+    # Attenuation is graded ACROSS active_mask's -40 dB floor, measured
+    # 2026-08-28: -20 and -30 dB leave coverage at 1.000, -40 dB drops it to
+    # 0.116, -50 dB bottoms out at 0.025. The first two are therefore DELIBERATE
+    # NEGATIVE CONTROLS -- faults this check should NOT catch -- so a 0% column
+    # and an INERT flag for them is the expected result, not a broken fixture.
+    # A family sitting entirely on one side of the cliff cannot locate it, which
+    # is exactly what the original lone `quiet_30db` did.
+    ("quiet_30db", lambda s,r,g: faults.attenuate(s,r, -30.0)),
+    ("quiet_40db", lambda s, r, g: faults.attenuate(s, r, -40.0)),
+    ("quiet_50db", lambda s, r, g: faults.attenuate(s, r, -50.0)),
+)
+
+ARTIFACT_FAULTS = (
+    ("snr20", lambda s,r,g: faults.add_noise(s,r, 20.0, rng=g)),
+    ("snr10", lambda s,r,g: faults.add_noise(s,r, 10.0, rng=g)),
+    ("snr0", lambda s,r,g: faults.add_noise(s,r, 0.0, rng=g)),
+    ("holes_50", lambda s,r,g: faults.punch_holes(s,r, 0.50, rng=g)),
+    ("holes_75", lambda s,r,g: faults.punch_holes(s,r, 0.75, rng=g))
+)
+
+ALL_FAULTS = VAD_FAULTS + ARTIFACT_FAULTS
+#: Which healthy population each fault arm is scored against.
+FAULT_ARMS = (("fault_g_", CORRECT), ("fault_clean_", CLEAN_CORRECT))
 
 def _device(preferred: str | None) -> str:
     import torch
@@ -122,6 +159,7 @@ def measure_scene(
     encoder: TitaNetEncoder,
     extractor: TFGridNetCrossAttnExtractor,
     diarizer=None,
+    artifact_min_energy_db: float | None = None
 ) -> list[dict]:
     """Measure all four gate diagnostics on one scene, for every population.
 
@@ -191,13 +229,23 @@ def measure_scene(
         else:
             contaminated_variances.append(result.variance)
 
-    # Correct conditioning, and the same speakers re-extracted with a
-    # neighbour's embedding. Rolling the embedding matrix keeps speaker i's own
-    # windows and activity while feeding G the wrong identity -- the
-    # off-diagonal of the Phase 1 conditioning probe, reused as a gate stimulus.
-    outputs_correct = reconstruct_all(x, x_O, activity, solo, embeddings, extractor, fade=fade)
+    # `G` is run ONCE per speaker and the raw output kept, so every fault
+    # population below is a numpy corruption of a cached tensor rather than
+    # another forward pass. Ten populations therefore cost one extraction.
+    g_out = np.stack([
+        np.asarray(extractor.extract(x_O, embeddings[i]), dtype=np.float64)
+        for i in range(num_speakers)
+    ])
+    x_samples_ = np.asarray(x, dtype=np.float64)
+    outputs_correct = np.stack([
+        _stitch(x_samples_, g_out[i], solo[i], activity[i], fade)
+        for i in range(num_speakers)
+    ])
+
+    # Swapped conditioning keeps `reconstruct_all`: it needs a genuine forward pass with no rolled embeddings,
+    # and no fault populating is built from it, so there is nothing to gain from caching its `g_out` the way `correct` does.
     outputs_swapped = (
-        reconstruct_all(x, x_O, activity, solo, np.roll(embeddings, 1, axis=0), extractor, fade=fade)
+        reconstruct_all(x, x_O, activity, solo, np.roll(embeddings, 1, axis=0), extractor, fade)
         if num_speakers > 1 else None
     )
 
@@ -251,7 +299,13 @@ def measure_scene(
         def _row(population: str, estimate: np.ndarray, variance: np.ndarray) -> dict:
             diagnostics = gate_diagnostics(
                 estimate, scene.sample_rate, embeddings[i], others, encoder,
-                variance, expected_active,
+                variance, expected_active, 
+                # Must match `_fault_row`. Without this the healthy populations
+                # carry whole-track flatness (~0.74) while every fault carries
+                # the energy-gated one (~0.4), so the artifact sweep silently
+                # compares two different quantities and reads the offset as a
+                # fault effect -- in the direction opposite to the real one.
+                artifact_min_energy_db=artifact_min_energy_db,
             )
             return {
                 "scene": scene.name, "speaker": spk, "m": num_speakers,
@@ -261,6 +315,25 @@ def measure_scene(
                 "vad_coverage": diagnostics.vad_coverage,
                 "artifact_score": diagnostics.artifact_score,
             }
+
+        def _fault_row(population: str, estimate: np.ndarray) -> dict:
+            """VAD + artifact only; margin and V_i recorded as nan.
+
+            Deliberate: a fault population needs no margin, and computing one
+            would add ~18 TitaNet calls per speaker (~8,100 on a 150-scene dev
+            split) to answer a question Q1 does not ask. The nans are honest --
+            `apply_thresholds` is NaN-safe and `_values` filters them -- but the
+            `.md` says so explicitly rather than leaving it to be inferred.
+            """
+            return {
+                "scene": scene.name, "speaker": spk, "m": num_speakers,
+                "population": population,
+                "mean_variance": float("nan"),
+                "margin": float("nan"),
+                "vad_coverage": vad_coverage(estimate, expected_active, scene.sample_rate),
+                "artifact_score": spectral_flatness(estimate, min_energy_db=artifact_min_energy_db),
+            }
+
 
         healthy = _row(HONEST, outputs_correct[i], variances[i])
         rows.append(healthy)
@@ -273,6 +346,21 @@ def measure_scene(
         if clean_correct is not None and num_speakers > 1:
             rows.append(_row(CLEAN_CORRECT, clean_correct[i], variances[i]))
             rows.append(_row(CLEAN_SWAPPED, clean_swapped[i], variances[i]))
+
+        # ---- manufactured fault populations (NOT DEPLOYABLE) ----------------
+        # Corrupt what `G` produced, then stitch through the SAME windows. The
+        # solo half stays a clean copy of the mixture, so what is being measured
+        # is "G failed", not "the pipeline broke".
+        w_Ei_i, w_Oi_i = crossfade_windows(solo[i], activity[i], fade=fade)
+        region = w_Oi_i > 0
+        bases = [("fault_g_", g_out[i])]
+        if clean_correct is not None and num_speakers > 1:
+            bases.append(("fault_clean_", np.asarray(scene.sources, dtype=np.float64)[i]))
+        for prefix, base in bases:
+            for name, corrupt in ALL_FAULTS:
+                corrupted = corrupt(base, region, _fault_rng(scene.name, i))
+                rows.append(_fault_row(prefix + name, _stitch(x_samples_, corrupted, solo[i], activity[i], fade)))
+
     return rows
 
 
@@ -387,6 +475,146 @@ def _rate_sweep(rows: list[dict], field: str, grid: list[float], *, reject_below
     ]
     return lines
 
+def _graded_detection_sweep(
+        rows: list[dict],
+        field: str,
+        grid: list[float],
+        *,
+        healthy: str,
+        faulty: list[tuple[str, str]],
+        reject_below: bool,
+        arm: str,
+        budget: float
+    ) -> list[str]:
+
+    """Detection table for a GRADED family of manufactured faults.
+
+    One column per severity, all sharing one false-rejection column computed on ``healthy``.
+    This is the table that actually places a threshold: a single (detection, false rejection) pair says only whether a fault is caught, while the graded row
+    says HOW BAD a fault has to be before it is caught, and whether the threshold is too aggressive on healthy data. 
+
+    **The suggestion criterion is NOT Youden's J, and that is deliberate.** J weights a missed detection and a false rejection equally, which is incoherent for a graded family.
+    Its answer depends on how many severities happen to be in table, so addinga milder fixture would move the recommendation with no new evidence.
+    Instead: the tightest threshold whose false rejection stays within ``budget``. Both are monotone in the threshold, so that is simply the extreme admissible value -- stated as a rule rather than discovered by search,
+    because a search over a monotone function invites reading noise as an optimum. J is still printed per severity so this remains comparable with the V_i and margin sweeps above.
+    """
+    healthy_values = _values(rows, healthy, field)
+    direction = "<" if reject_below else ">"
+    labels = [label for label, _ in faulty]
+    lines = [
+        "", f"### `{field}` -- graded faults, {arm}", "",
+        f"(n={len(healthy_values)} healthy `{healthy}`; a value {direction} the threshold is "
+        f"rejected. Columns are detection per severity; false rej. is shared. "
+        f"Suggestion = tightest threshold with false rej. <= {100 * budget:.0f}%.)", "",
+        "| threshold | false rej. | " + " | ".join(f"`{label}`" for label in labels) + " |",
+        "|---" * (2 + len(labels)) + "|",
+    ]
+    populations = {label: _values(rows, population, field) for label, population in faulty}
+    empty = [label for label, values in populations.items() if values.size == 0]
+    if healthy_values.size == 0 or len(empty) == len(labels):
+        lines.append(f"| -- | (no rows: healthy n={len(healthy_values)}, empty faults {empty}) |"
+                     + " -- |" * len(labels))
+        return lines
+
+    def _rate(values: np.ndarray, threshold: float) -> float:
+        if values.size == 0:
+            return float("nan")
+        return float(np.mean(values < threshold)) if reject_below else float(np.mean(values > threshold))
+
+    suggested = None
+    for threshold in grid:
+        false_rej = _rate(healthy_values, threshold)
+        detections = [_rate(populations[label], threshold) for label in labels]
+        if false_rej <= budget:
+            # Monotone in `threshold`, so the last admissible value IS the
+            # tightest one; no search, no tie-breaking, nothing to read noise into.
+            if suggested is None or (threshold > suggested[0]) == reject_below:
+                suggested = (threshold, false_rej, detections)
+        lines.append(
+            f"| {threshold:g} | {100 * false_rej:.1f}% | "
+            + " | ".join("--" if np.isnan(c) else f"{100 * c:.1f}%" for c in detections) + " |"
+        )
+
+    lines += ["", "Youden's J per severity, at each candidate:", "",
+              "| threshold | " + " | ".join(f"`{label}`" for label in labels) + " |",
+              "|---" * (1 + len(labels)) + "|"]
+    for threshold in grid:
+        false_rejection = _rate(healthy_values, threshold)
+        lines.append(f"| {threshold:g} | " + " | ".join(
+            "--" if np.isnan(_rate(populations[label], threshold))
+            else f"{_rate(populations[label], threshold) - false_rejection:+.3f}"
+            for label in labels) + " |")
+
+    if empty:
+        lines += ["", f"_(no rows for {empty} -- this arm did not run for those faults.)_"]
+
+    if suggested is None:
+        lines += ["", f"**NO ADMISSIBLE THRESHOLD.** Every candidate in the grid rejects more than "
+                      f"{100 * budget:.0f}% of healthy `{healthy}`. Either the grid does not reach far "
+                      "enough into the safe tail, or this check cannot be applied to this arm without "
+                      "cutting into normal operation. Do NOT copy a value out of this table."]
+        return lines
+
+    threshold, false_rejection, detections = suggested
+    endpoint = threshold in (grid[0], grid[-1])
+    detected = [f"`{label}` {100 * c:.0f}%" for label, c in zip(labels, detections) if not np.isnan(c)]
+    lines += ["", f"**suggested `{field}`: {threshold:g}** -- {100 * false_rejection:.1f}% false "
+                  f"rejection, catching " + ", ".join(detected) + "."]
+    if endpoint:
+        # The V_i mistake, made impossible to repeat quietly: its threshold sat
+        # 500x outside the diagnostic's entire usable range for four sessions,
+        # and every observation of "it never fires" was correct while every
+        # inference drawn from it was wrong.
+        lines += ["", "**GRID DID NOT BRACKET.** The suggestion is the first or last value in the "
+                      "grid, so the real optimum may lie outside it entirely. Widen "
+                      f"`{field}_grid` and re-run before copying this into a config."]
+    return lines
+
+def _direction_report(
+    rows: list[dict],
+    field: str,
+    *,
+    healthy: str,
+    faulty: list[tuple[str, str]],
+    arm: str
+) -> list[str]:
+    """Which WAY each fault moves the diagnostic, and whether they agree.
+    
+    The check that makes artifact half worth running. ``max_artifact_score`` rejects values ABOVE it, which presumes every artifact raises flatness.
+    Additive noise does. Musical noise is sparse and tonal and may LOWER it. If the family disagrees in sign, a single one-sided threshold cannot catch both and the honest finding is tht the check needs to be replaced.
+    """
+    healthy_values = _values(rows, healthy, field)
+    lines = ["", f"### `{field}` -- direction of each fault, {arm}", "",
+             "| fault | median | shift vs healthy |", "|---|---|---|"]
+    if healthy_values.size == 0:
+        return lines + ["| -- | (healthy population empty) | -- |"]
+
+    baseline = float(np.median(healthy_values))
+    lines.append(f"| _healthy_ `{healthy}` | {baseline:.5f} | -- |")
+    shifts = {}
+    for label, population in faulty:
+        values = _values(rows, population, field)
+        if values.size == 0:
+            lines.append(f"| `{label}` | (no rows) | -- |")
+            continue
+        shift = float(np.median(values) - baseline)
+        shifts[label] = shift
+        flag = "  **INERT**" if abs(shift) < 1e-3 else ""
+        lines.append(f"| `{label}` | {np.median(values):.5f} | {shift:+.5f}{flag} |")
+    signs = {np.sign(s) for s in shifts.values() if abs(s) >= 1e-3}
+    if len(signs) > 1:
+        lines += ["", "**FAULTS DISAGREE IN SIGN.** Some corruptions raise this diagnostic and "
+                      "others lower it, so no single one-sided threshold catches both families. "
+                      "This check needs REPLACING rather than tuning -- do not pick a value from "
+                      "the table above."]
+
+    inert = [label for label, shift in shifts.items() if abs(shift) < 1e-3]
+    if inert:
+        lines += ["", f"**INERT FIXTURES: {inert}.** These corruptions did not move the median at "
+                      "all. Before concluding anything about the check, confirm the fixture is "
+                      "doing its job -- a fixture that changes nothing produces a sweep that looks "
+                      "like a well-behaved negative result."]
+    return lines
 
 def _current_config_section(rows: list[dict], gate_cfg: dict) -> list[str]:
     """What the thresholds currently in the config do on this dev split."""
@@ -425,6 +653,27 @@ def _write(rows: list[dict], lines: list[str], out_dir: Path, stem: str) -> None
     md_path.write_text("\n".join(lines) + "\n")
     print(f"wrote {csv_path} and {md_path}")
 
+def _stitch(x_samples: np.ndarray, overlap_signal: np.ndarray, solo_i, activity_i, fade: int):
+    """``x*w_Ei + overlap*w_Oi`` -- reconstruct_speaker's body, with the extractor
+    call lifted out so one ``G`` forward pass can feed every fault population.
+
+    Guarded by ``test_gate_faults.py::test_stitch_matches_reconstruct_all``: this
+    MUST reproduce ``reconstruct_all(...)[i]`` exactly, or the healthy `correct`
+    population silently stops being the thing every prior run measured.
+    """
+    w_Ei, w_Oi = crossfade_windows(solo_i, activity_i, fade=fade)
+    return np.asarray(x_samples, dtype=np.float64) * w_Ei + np.asarray(overlap_signal, dtype=np.float64) * w_Oi
+
+
+def _fault_rng(scene_name: str, speaker_index: int) -> np.random.Generator:
+    """Deterministic per (scene, speaker), so a re-run reproduces the CSV.
+
+    ``zlib.crc32`` rather than ``hash()``: Python's string hash is salted per
+    process, so a seed derived from it would make this script non-reproducible
+    while looking perfectly deterministic in any single session.
+    """
+    return np.random.default_rng(zlib.crc32(f"{scene_name}:{speaker_index}".encode()))
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -449,6 +698,23 @@ def main() -> int:
     extractor_cfg = dict(cfg.get("extractor", {}))
     checkpoint_path = extractor_cfg.pop("checkpoint", None)
     gate_cfg = cfg.get("gate", {})
+    artifact_energy_db = read_artifact_min_energy_db(gate_cfg)
+    # The pairing guard. `max_artifact_score` tuned WITH energy-gating is a
+    # threshold on a different quantity than one tuned without it, so this
+    # script refuses to mint a number unless the config has stated which. An
+    # explicit `artifact_min_energy_db: null` satisfies it -- the requirement is
+    # a decision on the record, not a particular value.
+    if "artifact_min_energy_db" not in gate_cfg:
+        raise SystemExit(
+            "gate.artifact_min_energy_db is not set in this config.\n"
+            "  Set it to -40.0 to score only frames with speech in them (recommended: the\n"
+            "  whole-track mean is dominated by each speaker's duty cycle -- clean audio and\n"
+            "  G's ~2 dB output score 0.7376 vs 0.7422, a 0.005 gap), or to `null` to keep\n"
+            "  the pre-2026-08-26 behaviour deliberately. Either way it must be explicit,\n"
+            "  because the max_artifact_score this run recommends is only valid alongside it."
+        )
+    print(f"artifact flatness: min_energy_db={artifact_energy_db!r}")
+
     tune_cfg = cfg.get("tune", {})
 
     encoder = TitaNetEncoder(device=device)
@@ -485,7 +751,7 @@ def main() -> int:
             try:
                 scene_rows = measure_scene(
                     scene, fade, enroll_k, min_clip_ms, enroll_budget_ms, encoder, extractor,
-                    diarizer=diarizer,
+                    diarizer=diarizer, artifact_min_energy_db=artifact_energy_db,
                 )
             except NoSoloRegionError as exc:
                 skipped += 1
@@ -504,8 +770,22 @@ def main() -> int:
         "max_artifact_score": tune_cfg.get("max_artifact_score_grid", [0.7, 0.8, 0.9, 1.0]),
     }
 
+    max_false_rejection = float(tune_cfg.get("max_false_rejection", 0.05))
+
     counts = {p: sum(1 for r in rows if r["population"] == p) for p in
               (HONEST, CONTAMINATED, CORRECT, SWAPPED, CLEAN_CORRECT, CLEAN_SWAPPED)}
+    counts.update({prefix + name: sum(1 for r in rows if r["population"] == prefix + name)
+                   for prefix, _ in FAULT_ARMS for name, _ in ALL_FAULTS})
+    # A guard that verifies zero rows is not a passing guard (CLAUDE.md §7):
+    # Test B once skipped all 288 rows and printed PASS while the property it
+    # checked was violated in 271 of them. The `G` arm must always be populated;
+    # the clean arm legitimately is not (m=1, or diarizer clusters).
+    missing = [prefix + name for name, _ in ALL_FAULTS
+               for prefix, _ in (("fault_g_", None),) if counts.get(prefix + name, 0) == 0]
+    if missing:
+        raise SystemExit(f"fault populations produced NO rows: {missing}. The fixtures did not run; "
+                         "every sweep below them would be vacuous.")
+    
     lines = [
         "# Confidence-gate threshold selection (dev split)", "",
         f"rows: {len(rows)}  |  populations: " +
@@ -555,6 +835,26 @@ def main() -> int:
     lines += ["", "## Rate sweeps (no fault population)"]
     lines += _rate_sweep(rows, "vad_coverage", grids["min_vad_coverage"], reject_below=True)
     lines += _rate_sweep(rows, "artifact_score", grids["max_artifact_score"], reject_below=False)
+    lines += ["", "## Graded fault sweeps (manufactured populations -- NOT DEPLOYABLE)", "",
+            "Faults are injected into `G`'s output *before* stitching, so the solo half stays "
+            "a clean copy of the mixture and what is measured is \"`G` failed\", not \"the "
+            "pipeline broke\". Margin and `V_i` are `nan` on these rows by design -- see "
+            "`_fault_row`.", ""]
+    for prefix, healthy_pop in FAULT_ARMS:
+        arm = "on `G`'s output" if prefix == "fault_g_" else "on the CLEAN source (a bound)"
+        vad_faulty = [(name, prefix + name) for name, _ in VAD_FAULTS]
+        art_faulty = [(name, prefix + name) for name, _ in ARTIFACT_FAULTS]
+        lines += _graded_detection_sweep(
+            rows, "vad_coverage", grids["min_vad_coverage"], healthy=healthy_pop,
+            faulty=vad_faulty, reject_below=True, arm=arm, budget=max_false_rejection)
+        lines += _direction_report(rows, "vad_coverage", healthy=healthy_pop,
+                                   faulty=vad_faulty, arm=arm)
+        lines += _graded_detection_sweep(
+            rows, "artifact_score", grids["max_artifact_score"], healthy=healthy_pop,
+            faulty=art_faulty, reject_below=False, arm=arm, budget=max_false_rejection)
+        lines += _direction_report(rows, "artifact_score", healthy=healthy_pop,
+                                   faulty=art_faulty, arm=arm)
+
     lines += _current_config_section(rows, gate_cfg)
     lines += [
         "", "## Next step", "",

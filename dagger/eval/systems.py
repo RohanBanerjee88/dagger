@@ -31,7 +31,10 @@ import numpy as np
 from dagger.audio.provenance import original_mixture
 from dagger.diarize.oracle import overlap_depth, overlap_mixture
 from dagger.enroll.topk import NoSoloRegionError, enroll_speaker
-from dagger.gate.confidence import confidence_gate
+from dagger.gate.confidence import (
+    confidence_gate,
+    artifact_min_energy_db
+)
 from dagger.metrics.sisdr import (
     depth_scale_factors, si_sdr, si_sdr_by_depth, si_sdr_pooled_by_depth,
 )
@@ -101,7 +104,7 @@ OVERALL_FIELDS = [
 # factor. Keeping the two grains in separate files makes that mistake hard.
 GATE_FIELDS = [
     "scene", "speaker", "system", "round",
-    "accepted", "mean_variance", "margin", "vad_coverage", "artifact_score", "reason",
+    "accepted", "mean_variance", "margin", "vad_coverage", "artifact_score", "reason"
 ]
 
 #: Valid values for ``deflation.order``. See :func:`deflation_order`.
@@ -193,6 +196,7 @@ def make_gate_fn(embeddings, variances, activity, overlap, encoder, sample_rate,
             max_mean_variance=gate_cfg["max_mean_variance"],
             min_vad_coverage=gate_cfg["min_vad_coverage"],
             max_artifact_score=gate_cfg["max_artifact_score"],
+            artifact_min_energy_db=artifact_min_energy_db(gate_cfg),
         )
 
     return gate_fn
@@ -416,6 +420,7 @@ def score_scene(
         candidate_audio=(
             np.stack([t for _, t in targets]) if refine_oracle_audio else None
         ),
+        artifact_min_energy_db=artifact_min_energy_db(gate_cfg)
     )
     outputs["coarse_to_fine"] = reconstruct_all(
         x, x_O, activity, solo, refined_embeddings, extractor, fade=fade,

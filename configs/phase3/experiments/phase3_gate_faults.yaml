@@ -1,0 +1,92 @@
+# Phase 3 Q1: THE TWO GATE CHECKS THAT HAVE NEVER BEEN TUNED.
+#
+# *** PRODUCES A DEPLOYABLE NUMBER *AND* A BOUND. Read the arms separately. ***
+# `fault_g_*` corrupts G's output -- deployable, this checkpoint.
+# `fault_clean_*` corrupts the clean source -- reads scene.sources, NOT deployable.
+#
+# WHY IT EXISTS. Counted across every gate decision this project has recorded
+# (10,950 rows), `min_vad_coverage` has fired 0 times and `max_artifact_score`
+# 45. Neither has ever been swept, and the reason is structural rather than an
+# oversight: tune_gate.py can only give a check a DETECTION sweep when a labelled
+# fault population exists, and these two have none. "0 firings" is equally
+# consistent with the failure mode never occurring and with the threshold sitting
+# in the wrong place entirely -- which is exactly what `V_i` turned out to be,
+# wrong by 500x, after being written off as structurally dead four times.
+#
+# WHAT IS ALREADY KNOWN, recomputed 2026-08-26 from the committed
+# gate_tune_clean_margin.csv with no new run:
+#   * vad_coverage on `G`'s output: J = +0.000 at every threshold (-0.047 at 0.9).
+#   * vad_coverage on CLEAN audio:  J = +0.680 at 0.6, 0% false rejection.
+#     Same shape as the margin -- sound diagnostic, starved by `G`.
+#   * artifact_score: clean 0.7376 vs `G` 0.7422. A 0.005 gap; no dynamic range.
+#     The shipped 0.9 sits ABOVE pure white noise (0.847).
+#
+# PREDICTIONS ON RECORD, so this run can falsify them:
+#   1. With min_energy_db: -40, healthy artifact_score falls 0.742 -> ~0.35-0.45.
+#      If it does not move, the duty-cycle diagnosis is wrong.
+#   2. The `fault_g_` arm stays a non-detector for both checks; the
+#      `fault_clean_` arm separates. Q1 then reads "4 of 4 diagnosed, 2 starved".
+#   3. add_noise and punch_holes may move artifact_score in OPPOSITE directions.
+#      If they do, `max_artifact_score` needs replacing, not tuning.
+#
+# ORACLE REGIONS ON PURPOSE (`diarizer:` absent): the clean arm needs row i to BE
+# source i, which anonymous diarizer clusters do not give. The V_i half of the
+# report is therefore structurally 0 and meaningless here, as in the Q1b run.
+#
+#   DAGGER_DATA_ROOT=/kaggle/working/data python scripts/tune_gate.py \
+#       --config configs/phase3/experiments/phase3_gate_faults.yaml
+
+sample_rate: 8000
+fade_ms: 5
+
+dataset:
+  name: librimix
+  metadata: metadata/Libri3Mix/libri3mix_dev_long.csv
+  n_src: 3
+  placement: chain
+  overlap: 0.3
+  min_solo_ms: 1000.0
+  limit: 50
+  diarizer_sample_rate: 16000
+
+enroll:
+  k: 3
+  min_clip_ms: 500.0
+
+extractor:
+  hidden_channels: 64
+  n_blocks: 6
+  n_fft: 256
+  hop_length: 64
+  n_heads: 4
+  n_tokens: 8
+  cross_attn_blocks: 6
+  checkpoint: checkpoints/phase2/proposed_librimix_curriculum_3_4_5_scratch_clip50.pt
+
+gate:
+  tau_margin: 0.1
+  max_mean_variance: 0.05
+  min_vad_coverage: 0.5
+  max_artifact_score: 0.9
+  # REQUIRED by tune_gate.py -- a max_artifact_score tuned with gating is a
+  # threshold on a different quantity than one tuned without it. `null` keeps the
+  # pre-2026-08-26 whole-track mean; -40.0 scores only frames with speech in them.
+  artifact_min_energy_db: -40.0
+
+tune:
+  # Bracketed to the ranges actually observed, not to round numbers. Healthy
+  # vad_coverage bottoms out at 0.61-0.82 across both committed runs, so a grid
+  # topping out at 0.75 could not find a threshold above the healthy floor --
+  # and a grid starting at 0.0 wastes half its rows below anything real.
+  min_vad_coverage_grid: [0.30, 0.40, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+  # Left wide on purpose: prediction 1 says energy-gating moves healthy down to
+  # ~0.4, so the interesting region moves with it. If the suggestion lands on an
+  # endpoint the script says GRID DID NOT BRACKET rather than recommending it.
+  max_artifact_score_grid: [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+  max_mean_variance_grid: [0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
+  tau_margin_grid: [-0.2, -0.1, 0.0, 0.05, 0.1, 0.15, 0.2, 0.3]
+  # A false rejection costs real quality on every scene; a missed detection costs
+  # only on faulty ones. 5% is the budget the suggestion is held to.
+  max_false_rejection: 0.05
+  results_dir: results/phase3/experiments
+  tag: gate_faults

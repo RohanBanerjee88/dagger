@@ -19,6 +19,7 @@ from conftest import FakeDiarizer  # noqa: E402
 
 from dagger.enroll.encoder import SpeakerEncoder  # noqa: E402
 from dagger.extract.base import Extractor  # noqa: E402
+import dagger.gate.confidence as confidence_mod
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -247,3 +248,22 @@ class TestConfigFlagsReachScoreScene:
         sig = inspect.signature(run_phase3.score_scene_all_arms).parameters
         for flag in ("refine_oracle_ceiling", "refine_oracle_audio", "rescale_to_mixture"):
             assert flag in sig, f"score_scene_all_arms lost the {flag} parameter"
+
+    def test_artifact_min_energy_db_reaches_the_flatness_call(self, monkeypatch):
+        # CLAUDE.md §9's first entry: a flag read, validated, warned about and
+        # never forwarded cost ~3.4 h of GPU producing output bit-identical to a
+        # plain run. Four call sites now read this one; assert it lands.
+        
+        SAMPLE_RATE = 8000
+        seen = []
+        monkeypatch.setattr(
+            confidence_mod, "spectral_flatness",
+            lambda estimate, **kwargs: seen.append(kwargs.get("min_energy_db")) or 0.0,
+        )
+        confidence_mod.gate_diagnostics(
+            np.zeros(4000), SAMPLE_RATE, np.array([1.0]), [np.array([0.0])],
+            _FakeEncoder(), np.zeros(1), np.ones(4000, dtype=bool),
+            artifact_min_energy_db=-40.0,
+        )
+        assert seen == [-40.0]
+

@@ -67,6 +67,14 @@ gate:
   max_mean_variance: 0.05
   min_vad_coverage: 0.5
   max_artifact_score: 0.9
+  # Deliberately null: this run predates the 2026-08-26 energy gate, and its
+  # committed artifact_score column is the WHOLE-TRACK flatness mean. Setting
+  # -40.0 here would silently regenerate the file with a different quantity
+  # under the same name. tune_gate.py requires the key to be present either
+  # way -- a max_artifact_score tuned with gating is a threshold on a
+  # different measurement, so the two must always travel together (CLAUDE.md
+  # §7: every committed number stays regenerable by its own generator).
+  artifact_min_energy_db: null
 
 tune:
   # Bracket the range Stage A actually observed (max 3.24e-4) as well as the

@@ -63,6 +63,7 @@ def gate_diagnostics(
     expected_active: np.ndarray,
     *,
     precomputed_embedding: np.ndarray | None = None,
+    artifact_min_energy_db: float | None = None
 ) -> GateDiagnostics:
     """Compute all four gate diagnostics unconditionally.
 
@@ -81,7 +82,7 @@ def gate_diagnostics(
             precomputed_embedding=precomputed_embedding,
         ),
         vad_coverage=vad_coverage(estimate, expected_active, sample_rate),
-        artifact_score=spectral_flatness(estimate),
+        artifact_score=spectral_flatness(estimate, min_energy_db=artifact_min_energy_db)
     )
 
 
@@ -149,6 +150,7 @@ def confidence_gate(
     max_artifact_score: float,
     precomputed_embedding: np.ndarray | None = None,
     full_diagnostics: bool = False,
+    artifact_min_energy_db: float | None = None
 ) -> GateResult:
     """Accept/reject one speaker's extracted estimate ``ŝ_i``.
 
@@ -187,5 +189,21 @@ def confidence_gate(
         estimate, sample_rate, embedding_self, embeddings_others, encoder,
         enrollment_variance, expected_active,
         precomputed_embedding=precomputed_embedding,
+        artifact_min_energy_db=artifact_min_energy_db
     )
     return apply_thresholds(diagnostics, **thresholds)
+
+def artifact_min_energy_db(gate_cfg: dict) -> float | None:
+    """Read ``artifact_min_energy_db`` out of a ``gate:`` config block.
+
+    Absent -> ``None`` -> the pre-2026-08-26 whole-track flatness, so every
+    existing config is byte-identical. Present and ``null`` -> also ``None``,
+    but *deliberately*, which is what ``scripts/tune_gate.py`` requires before
+    it will recommend a ``max_artifact_score``.
+
+    Exists as a named reader rather than four scattered ``.get`` calls because
+    CLAUDE.md §9's first entry is a flag that was read, validated, warned about
+    and never forwarded -- ~3.4 h of GPU producing output bit-identical to a
+    plain run. One reader, four call sites, one test per call site.
+    """
+    return gate_cfg.get("artifact_min_energy_db")
