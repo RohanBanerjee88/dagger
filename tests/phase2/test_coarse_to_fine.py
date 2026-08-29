@@ -267,7 +267,7 @@ class TestTheReportedDefaultAndTheCodeDefaultAgree:
     sets `rounds` explicitly -- but it meant any NEW config omitting the key
     silently switched on a stage now measured at **+0.002 dB** even with a
     perfect candidate and an open gate (Stage B Session 3, Q4b), and bounded at
-    **<= +0.18 dB** on the acceptance-rule axis (Session 1).
+    **<= +0.18 dB** on the acceptance-rule axis (Stage B Session 1).
 
     Pinned here because nothing else would catch the drift recurring: the two
     defaults lived in different files from each other and from the prose that

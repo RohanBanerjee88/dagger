@@ -107,7 +107,7 @@ def refine_embeddings(
     Measured 2026-08-25 (Stage B Session 3, ``refine_oracle_audio``): with the
     candidate embedded from the CLEAN SOURCE and the gate accepting 300/300, the
     deficit against ``no_recursion`` at depth 2 is **+0.002 dB (oracle) / +0.070
-    (real)** -- neutral, not helpful. Session 1's oracle-RULE ceiling bounded the
+    (real)** -- neutral, not helpful. Stage B Session 1's oracle-RULE ceiling bounded
     other axis at **<= +0.18 dB**. Both axes of the working window are therefore
     closed near zero, and ``rounds`` now defaults to 0.
 
