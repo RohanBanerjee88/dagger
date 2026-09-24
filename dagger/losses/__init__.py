@@ -1,15 +1,23 @@
-"""Training losses: SI-SDR, PIT (blind baseline), speaker-consistency, noise-head, artifact.
+"""Training losses: SI-SDR, PIT (blind baseline), and the theory's four-term objective.
 
-Phase 1 implements ``dagger.losses.sisdr`` (differentiable SI-SDR, used to
-train the proposed extractor directly and, via ``dagger.losses.pit``, the
-blind-separation baseline). Speaker-consistency and artifact losses remain
-unimplemented.
+The theory's objective (docs/diarization_full_mathematical_theory.pdf S10;
+errata S6) is::
 
-The noise-head reconstruction loss (``||x_O - sum s_hat_i - n_hat||^2``) is
-deliberately deferred, not yet implemented: WSJ0-2mix/LibriMix scenes
-(``dagger.data.mixing.mix_sources``) are anechoic sums with no noise term by
-construction, so Phase 1 trains noise-free (CLAUDE.md §2's explicit "or train
-on noise-free data" branch). This noise head MUST land before Phase 3 trains
-on real/noisy corpora, or the reconstruction loss will fight the separation
-loss whenever noise != 0 (guardrail §6.5).
+    L = l1*L_sep + l2*L_spk + l3*L_recon + l4*L_art
+
+Of those four, the documents write out exactly ONE: ``L_recon``. ``L_sep`` is
+described only in prose ("a separation term pushing s_hat_i -> s_i"), and
+``L_spk`` and ``L_art`` are bare symbols. The modules in this package mirror
+that state, not the code's behaviour: ``sep``, ``spk`` and ``art`` raise
+NotImplementedError and carry the reasons, ``recon`` is implemented.
+
+What training actually runs is ``dagger.losses.sisdr.si_sdr_loss``, called
+directly from scripts/train_phase1.py. SI-SDR was chosen in Phase 1 to mirror
+the evaluation metric (``dagger.metrics.sisdr``, Phase 0, two days earlier).
+It is deliberately NOT wrapped as ``L_sep``: that would assert a correspondence
+the theory never states.
+
+``dagger.losses.pit`` implements Eq. (7), the blind-separation baseline. It is
+not a term in the objective -- and it is the only loss here transcribed from a
+formula the documents actually write out.
 """
